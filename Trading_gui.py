@@ -25,6 +25,7 @@ import signal
 import json
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
+from pathlib import Path
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -44,6 +45,10 @@ root.geometry("1400x900")
 symbol_data = {}
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = "active_monitors.json"
+
+scan_button = None
+scan_status_var = None
+is_scanning = False
 
 def save_active_monitor(iid):
     data = order_tree.item(iid)['values']
@@ -188,7 +193,35 @@ def delete_selected_order():
         order_tree.delete(item)
 
 def run_scan():
-    subprocess.Popen([sys.executable, "scan_eod.py"])
+    global is_scanning
+
+    if is_scanning or scan_button is None or scan_status_var is None:
+        return
+
+    def run_process():
+        status_message = "Completed"
+        try:
+            subprocess.run(
+                [sys.executable, Path(__file__).with_name("pattern_scanner.py")],
+                check=True,
+            )
+        except subprocess.CalledProcessError as err:
+            status_message = f"Error: {err}"
+        except Exception as err:  # Catch unexpected issues and surface message
+            status_message = f"Error: {err}"
+
+        def finalize():
+            global is_scanning
+            scan_status_var.set(status_message)
+            scan_button.config(state=tk.NORMAL)
+            is_scanning = False
+
+        root.after(0, finalize)
+
+    is_scanning = True
+    scan_status_var.set("Running…")
+    scan_button.config(state=tk.DISABLED)
+    threading.Thread(target=run_process, daemon=True).start()
 
 def flatten_yf_columns(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -303,6 +336,7 @@ def sort_treeview(tree, col, descending=False):
 
 def setup_layout():
     global tree, chart_frame, symbol_var, qty_var, entry_var, sl_var, total_value_var, order_tree
+    global scan_button, scan_status_var, is_scanning
 
     last_edited = {"field": None}
 
@@ -348,7 +382,11 @@ def setup_layout():
         last_edited["field"] = field_name
 
     top = tk.Frame(root); top.pack(fill="x", padx=10, pady=5)
-    tk.Button(top, text="Run scan_eod.py", command=run_scan).pack(side="left")
+    scan_status_var = tk.StringVar(value="Idle")
+    is_scanning = False
+    scan_button = tk.Button(top, text="Pattern Scanner", command=run_scan)
+    scan_button.pack(side="left")
+    tk.Label(top, textvariable=scan_status_var).pack(side="left", padx=5)
 
     tree_frame = tk.Frame(root); tree_frame.pack(fill="x", padx=10)
     tree = ttk.Treeview(tree_frame, columns=WATCHLIST_COLUMNS, show="headings", height=8)
