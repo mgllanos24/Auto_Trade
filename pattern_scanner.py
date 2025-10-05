@@ -108,11 +108,34 @@ def is_uptrend(df):
     pass_count = sum([ma50 > ma200, slope > 0, vwap_ok, structure_ok, monthly_ok])
     return pass_count >= 3
 
-def detect_double_bottom(df):
-    recent = df.tail(60)
-    min_val = recent['low'].min()
-    min_locs = recent[recent['low'] <= min_val * 1.02]
-    return len(min_locs) >= 2
+def detect_double_bottom(df, window=120, tolerance=0.03, min_bounce=0.03):
+    """Detect a double bottom pattern in the recent price action."""
+    recent = df.tail(window)
+    lows = recent['low'].values
+    highs = recent['high'].values
+
+    # Identify local minima (potential bottoms)
+    troughs, _ = find_peaks(-lows, distance=5)
+    if len(troughs) < 2:
+        return False
+
+    # Use the last two troughs for the pattern
+    left_idx, right_idx = troughs[-2], troughs[-1]
+    if right_idx - left_idx < 5:
+        return False
+
+    left_low, right_low = lows[left_idx], lows[right_idx]
+
+    # Bottoms should be within the tolerance band
+    if abs(left_low - right_low) / max(left_low, right_low) > tolerance:
+        return False
+
+    # Ensure there is a meaningful bounce between the two lows
+    mid_high = highs[left_idx:right_idx + 1].max()
+    if (mid_high - min(left_low, right_low)) / min(left_low, right_low) < min_bounce:
+        return False
+
+    return True
 
 def detect_inverse_head_shoulders(df):
     lows = df['low'].tail(60).values
