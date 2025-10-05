@@ -288,23 +288,60 @@ def show_candlestick():
     volume_by_price.index = price_levels[volume_by_price.index - 1]
     norm_vol = volume_by_price / volume_by_price.max()
 
-    fig, (ax_vp, ax) = plt.subplots(
-        nrows=1, ncols=2, figsize=(10, 4), width_ratios=[1.2, 4], sharey=True
-    )
+    fig = plt.figure(figsize=(12, 6))
+    gs = fig.add_gridspec(3, 2, width_ratios=[1.2, 4], height_ratios=[3, 1, 1], wspace=0.05)
+
+    ax_price = fig.add_subplot(gs[0, 1])
+    ax_vp = fig.add_subplot(gs[:, 0], sharey=ax_price)
+    ax_volume = fig.add_subplot(gs[1, 1], sharex=ax_price)
+    ax_rsi = fig.add_subplot(gs[2, 1], sharex=ax_price)
 
     for t, o, h, l, c in ohlc:
         color = 'green' if c >= o else 'red'
-        ax.plot([t, t], [l, h], color='black')
-        ax.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
+        ax_price.plot([t, t], [l, h], color='black')
+        ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
 
     ax_vp.barh(volume_by_price.index, norm_vol, height=bin_size * 0.9, color='gray')
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
     ax_vp.invert_xaxis()
+    ax_vp.tick_params(axis='y', labelleft=True, left=True, labelright=False, right=False)
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(10))
-    fig.autofmt_xdate()
+    volume_colors = ['green' if c >= o else 'red' for o, c in zip(df['Open'], df['Close'])]
+    ax_volume.bar(df['Date'], df['Volume'], width=0.6, color=volume_colors, align='center')
+    ax_volume.set_ylabel('Volume')
+    ax_volume.yaxis.set_label_position('right')
+
+    delta = df['Close'].diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.rolling(window=14, min_periods=14).mean()
+    avg_loss = losses.rolling(window=14, min_periods=14).mean()
+    avg_loss_replaced = avg_loss.replace(0, pd.NA)
+    rs = avg_gain / avg_loss_replaced
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50)
+    rsi[(avg_loss == 0) & (avg_gain > 0)] = 100
+    rsi[(avg_loss == 0) & (avg_gain == 0)] = 50
+
+    ax_rsi.plot(df['Date'], rsi, color='purple', linewidth=1)
+    ax_rsi.axhline(70, color='red', linestyle='--', linewidth=1)
+    ax_rsi.axhline(30, color='green', linestyle='--', linewidth=1)
+    ax_rsi.set_ylim(0, 100)
+    ax_rsi.set_ylabel('RSI (14)')
+    ax_rsi.yaxis.set_label_position('right')
+    ax_rsi.set_yticks([0, 30, 50, 70, 100])
+
+    ax_price.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax_price.xaxis.set_major_locator(mticker.MaxNLocator(10))
+    fig.autofmt_xdate(rotation=45)
+    fig.align_xlabels([ax_rsi])
+
+    ax_price.tick_params(axis='x', labelbottom=False)
+    ax_volume.tick_params(axis='x', labelbottom=False)
+    ax_volume.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
+    ax_rsi.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
+    ax_rsi.set_xlabel('Date')
     long_name = _long_name_cache.get(sym)
     if long_name is None:
         try:
@@ -315,11 +352,10 @@ def show_candlestick():
 
     title_name = long_name or sym
 
-    ax.set_ylabel('Price')
-    ax.set_title(f"{title_name} ({sym}) Candlestick with Volume Profile")
-    ax.yaxis.set_label_position('right')
-    ax.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
-    ax_vp.tick_params(axis='y', labelleft=True, left=True, labelright=False, right=False)
+    ax_price.set_ylabel('Price')
+    ax_price.set_title(f"{title_name} ({sym}) Candlestick with Volume Profile")
+    ax_price.yaxis.set_label_position('right')
+    ax_price.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
 
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     canvas = FigureCanvasTkAgg(fig, master=chart_frame)
