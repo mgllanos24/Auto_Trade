@@ -43,6 +43,7 @@ root.title("Stock Scanner GUI")
 root.geometry("1400x900")
 
 symbol_data = {}
+_long_name_cache = {}
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = "active_monitors.json"
 
@@ -266,8 +267,18 @@ def show_candlestick():
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     ax.xaxis.set_major_locator(mticker.MaxNLocator(10))
     fig.autofmt_xdate()
+    long_name = _long_name_cache.get(sym)
+    if long_name is None:
+        try:
+            long_name = yf.Ticker(sym).info.get("longName")
+        except Exception:
+            long_name = None
+        _long_name_cache[sym] = long_name
+
+    title_name = long_name or sym
+
     ax.set_ylabel('Price')
-    ax.set_title(f"{sym} Candlestick with Volume Profile")
+    ax.set_title(f"{title_name} ({sym}) Candlestick with Volume Profile")
     ax.yaxis.set_label_position('right')
     ax.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
     ax_vp.tick_params(axis='y', labelleft=True, left=True, labelright=False, right=False)
