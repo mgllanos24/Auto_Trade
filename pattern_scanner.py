@@ -426,8 +426,8 @@ def scan_all_symbols(symbols):
                 pattern = "Inverse Head and Shoulders"
             elif detect_ascending_triangle(df):
                 pattern = "Ascending Triangle"
-            elif detect_pennant(df):
-                pattern = "Pennant"
+            elif detect_bullish_pennant(df):
+                pattern = "Bullish Pennant"
             elif detect_bullish_flag(df):
                 pattern = "Bullish Flag"
             elif detect_bullish_rectangle(df):
