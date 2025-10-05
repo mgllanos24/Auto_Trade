@@ -108,9 +108,9 @@ def is_uptrend(df):
     pass_count = sum([ma50 > ma200, slope > 0, vwap_ok, structure_ok, monthly_ok])
     return pass_count >= 3
 
-def detect_double_bottom(df, window=120, tolerance=0.03, min_bounce=0.03):
+def detect_double_bottom(df, window=60, tolerance=0.03, min_bounce=0.03):
     """Detect a double bottom pattern in the recent price action."""
-    recent = df.tail(window)
+    recent = df.tail(min(window, 60))
     lows = recent['low'].values
     highs = recent['high'].values
 
@@ -479,7 +479,7 @@ def scan_all_symbols(symbols):
             df = get_yf_data(symbol)
             entry = df['close'].iloc[-1]
 
-            if detect_double_bottom(df):
+            if detect_double_bottom(df, window=60):
                 pattern = "Double Bottom"
             elif detect_inverse_head_shoulders(df):
                 pattern = "Inverse Head and Shoulders"
