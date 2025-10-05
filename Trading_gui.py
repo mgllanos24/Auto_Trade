@@ -267,6 +267,9 @@ def show_candlestick():
     fig.autofmt_xdate()
     ax.set_ylabel('Price')
     ax.set_title(f"{sym} Candlestick with Volume Profile")
+    ax.yaxis.set_label_position('right')
+    ax.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
+    ax_vp.tick_params(axis='y', labelleft=True, left=True, labelright=False, right=False)
 
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     canvas = FigureCanvasTkAgg(fig, master=chart_frame)
