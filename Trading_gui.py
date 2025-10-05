@@ -12,6 +12,7 @@ def navigate_chart(direction):
 
 import os
 import sys
+import shutil
 import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -283,6 +284,40 @@ def load_watchlist():
     for _, row in df.iterrows():
         tree.insert("", "end", values=[row[col] for col in WATCHLIST_COLUMNS])
 
+def refresh_watchlist():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    transfer_script = os.path.join(script_dir, "transfer_watchlist.py")
+
+    try:
+        if os.path.exists(transfer_script):
+            subprocess.run([sys.executable, transfer_script], check=True, capture_output=True, text=True)
+        else:
+            shared_dirs = []
+            env_shared = os.getenv("WATCHLIST_SHARED_DIR")
+            if env_shared:
+                shared_dirs.append(env_shared)
+            shared_dirs.append(os.path.join(script_dir, "shared"))
+
+            destination = os.path.join(script_dir, "watchlist.csv")
+            for shared_dir in shared_dirs:
+                if not shared_dir:
+                    continue
+                source = os.path.join(shared_dir, "watchlist.csv")
+                if os.path.exists(source):
+                    shutil.copy2(source, destination)
+                    break
+            else:
+                raise FileNotFoundError("Could not locate watchlist.csv in any shared directory")
+    except subprocess.CalledProcessError as e:
+        error_message = e.stderr.strip() if e.stderr else str(e)
+        messagebox.showerror("Reload Watchlist", f"Failed to refresh watchlist:\n{error_message}")
+        return
+    except Exception as e:
+        messagebox.showerror("Reload Watchlist", f"Failed to refresh watchlist:\n{e}")
+        return
+
+    load_watchlist()
+
 def sort_treeview(tree, col, descending=False):
     def sort_key(item):
         value = tree.set(item, col)
@@ -349,6 +384,7 @@ def setup_layout():
 
     top = tk.Frame(root); top.pack(fill="x", padx=10, pady=5)
     tk.Button(top, text="Run scan_eod.py", command=run_scan).pack(side="left")
+    tk.Button(top, text="Reload Watchlist", command=refresh_watchlist).pack(side="right", padx=5)
 
     tree_frame = tk.Frame(root); tree_frame.pack(fill="x", padx=10)
     tree = ttk.Treeview(tree_frame, columns=WATCHLIST_COLUMNS, show="headings", height=8)
@@ -404,7 +440,6 @@ def setup_layout():
     tk.Button(controls, text="Download All Data", command=download_all_data).pack(side="left", padx=5)
     tk.Button(controls, text="Show Candlestick Chart", command=show_candlestick).pack(side="left", padx=5)
     tk.Button(controls, text="Delete from Watchlist", command=lambda: tree.delete(*tree.selection())).pack(side="left", padx=5)
-    tk.Button(controls, text="Reload Watchlist", command=load_watchlist).pack(side="left", padx=5)
     tk.Button(controls, text="Delete Selected Order", command=delete_selected_order).pack(side="left", padx=5)
     tk.Button(controls, text="Reload Active Monitors", command=rerun_stop_loss_monitors).pack(side="left", padx=5)
 
