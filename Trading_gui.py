@@ -280,6 +280,24 @@ def load_watchlist():
     for _, row in df.iterrows():
         tree.insert("", "end", values=[row[col] for col in WATCHLIST_COLUMNS])
 
+def sort_treeview(tree, col, descending=False):
+    def sort_key(item):
+        value = tree.set(item, col)
+        if value in ("", None):
+            return (2, "")
+        try:
+            return (0, float(value))
+        except (ValueError, TypeError):
+            return (1, str(value).lower())
+
+    items = list(tree.get_children(""))
+    items.sort(key=sort_key, reverse=descending)
+
+    for index, iid in enumerate(items):
+        tree.move(iid, "", index)
+
+    tree.heading(col, command=lambda: sort_treeview(tree, col, not descending))
+
 def setup_layout():
     global tree, chart_frame, symbol_var, qty_var, entry_var, sl_var, total_value_var, order_tree
 
@@ -332,7 +350,7 @@ def setup_layout():
     tree_frame = tk.Frame(root); tree_frame.pack(fill="x", padx=10)
     tree = ttk.Treeview(tree_frame, columns=WATCHLIST_COLUMNS, show="headings", height=8)
     for col in WATCHLIST_COLUMNS:
-        tree.heading(col, text=col.replace("_", " ").title())
+        tree.heading(col, text=col.replace("_", " ").title(), command=lambda c=col: sort_treeview(tree, c))
         tree.column(col, width=110, anchor="center")
     tree.pack(side="left", fill="x", expand=True)
     ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview).pack(side="right", fill="y")
@@ -374,7 +392,7 @@ def setup_layout():
     order_tree = ttk.Treeview(order_frame, columns=("Symbol", "Shares", "Entry Price", "Stop Loss Price", "Status", "order_id"), show="headings")
     for col in ("Symbol", "Shares", "Entry Price", "Stop Loss Price", "Status", "order_id"):
         width = 0 if col == "order_id" else 150
-        order_tree.heading(col, text=col)
+        order_tree.heading(col, text=col, command=lambda c=col: sort_treeview(order_tree, c))
         order_tree.column(col, width=width, anchor="center", stretch=(col != "order_id"))
     order_tree.pack(side="left", fill="x", expand=True)
     ttk.Scrollbar(order_frame, orient="vertical", command=order_tree.yview).pack(side="right", fill="y")
