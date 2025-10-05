@@ -175,6 +175,8 @@ def detect_inverse_head_shoulders(df):
     return False
 
 def detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2):
+    window = min(window, 60, len(df))
+
     highs = df['high'].tail(window).values
     lows = df['low'].tail(window).values
     closes = df['close'].tail(window).values
@@ -465,7 +467,7 @@ def _demo_ascending_triangle_detection():
         'volume': volume
     })
 
-    pattern_detected = detect_ascending_triangle(df, window=len(df), tolerance=0.02, min_touches=2)
+    pattern_detected = detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2)
     print("Synthetic ascending triangle detected:", pattern_detected)
 
 def scan_all_symbols(symbols):
