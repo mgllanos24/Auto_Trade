@@ -336,6 +336,7 @@ def load_watchlist():
 def refresh_watchlist():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     transfer_script = os.path.join(script_dir, "transfer_watchlist.py")
+    local_watchlist = os.path.join(script_dir, "watchlist.csv")
 
     try:
         if os.path.exists(transfer_script):
@@ -347,16 +348,29 @@ def refresh_watchlist():
                 shared_dirs.append(env_shared)
             shared_dirs.append(os.path.join(script_dir, "shared"))
 
-            destination = os.path.join(script_dir, "watchlist.csv")
+            destination = local_watchlist
+            shared_found = False
             for shared_dir in shared_dirs:
                 if not shared_dir:
                     continue
                 source = os.path.join(shared_dir, "watchlist.csv")
                 if os.path.exists(source):
                     shutil.copy2(source, destination)
+                    shared_found = True
                     break
-            else:
-                raise FileNotFoundError("Could not locate watchlist.csv in any shared directory")
+
+            if not shared_found:
+                if os.path.exists(local_watchlist):
+                    messagebox.showinfo(
+                        "Reload Watchlist",
+                        "Shared watchlist not found. Using existing local copy.",
+                    )
+                else:
+                    messagebox.showerror(
+                        "Reload Watchlist",
+                        "Could not locate watchlist.csv in shared directories or locally.",
+                    )
+                    return
     except subprocess.CalledProcessError as e:
         error_message = e.stderr.strip() if e.stderr else str(e)
         messagebox.showerror("Reload Watchlist", f"Failed to refresh watchlist:\n{error_message}")
