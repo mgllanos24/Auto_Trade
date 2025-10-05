@@ -443,30 +443,6 @@ def scan_all_symbols(symbols):
                 disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
                 continue
 
-            if detect_double_bottom(df):
-                pattern = "Double Bottom"
-            elif detect_inverse_head_shoulders(df):
-                pattern = "Inverse Head and Shoulders"
-            elif detect_ascending_triangle(df):
-                pattern = "Ascending Triangle"
-            elif detect_pennant(df):
-                pattern = "Pennant"
-                print(" Skipped: No pattern matched")
-                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
-                continue
-
-            if detect_double_bottom(df):
-                pattern = "Double Bottom"
-            elif detect_inverse_head_shoulders(df):
-                pattern = "Inverse Head and Shoulders"
-            elif detect_ascending_triangle(df):
-                pattern = "Ascending Triangle"
-            elif detect_pennant(df):
-                pattern = "Pennant"
-                print(" Skipped: No pattern matched")
-                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
-                continue
-
             if df.empty:
                 print(" Skipped: Bad or insufficient data")
                 disqualified.append({'symbol': symbol, 'reason': 'bad data', 'entry': None, 'rr': None})
@@ -485,20 +461,6 @@ def scan_all_symbols(symbols):
             if not is_near_breakout(df):
                 print(" Skipped: Not near breakout")
                 disqualified.append({'symbol': symbol, 'reason': 'not near breakout', 'entry': None, 'rr': None})
-                continue
-
-            entry = df['close'].iloc[-1]
-
-            if detect_double_bottom(df):
-                pattern = "Double Bottom"
-            elif detect_inverse_head_shoulders(df):
-                pattern = "Inverse Head and Shoulders"
-            elif detect_ascending_triangle(df):
-                pattern = "Ascending Triangle"
-            elif detect_pennant(df):
-                pattern = "Pennant"
-                print(" Skipped: No pattern matched")
-                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
                 continue
 
             stop, target, rr = calculate_rr_price_action(df, entry)
