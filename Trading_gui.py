@@ -14,6 +14,7 @@ import os
 import sys
 import shutil
 import subprocess
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pandas as pd
@@ -188,8 +189,45 @@ def delete_selected_order():
                 messagebox.showwarning("Cancel Order", f"Could not cancel Alpaca order:\n{e}")
         order_tree.delete(item)
 
+scan_status_var = None
+scan_button = None
+is_scanning = False
+
+
 def run_scan():
-    subprocess.Popen([sys.executable, "scan_eod.py"])
+    global is_scanning
+
+    if is_scanning or scan_status_var is None or scan_button is None:
+        return
+
+    script_path = Path(__file__).with_name("pattern_scanner.py")
+    if not script_path.exists():
+        messagebox.showerror("Pattern Scanner", f"Scanner script not found: {script_path}")
+        return
+
+    is_scanning = True
+    scan_status_var.set("Running…")
+    scan_button.config(state="disabled")
+
+    def worker():
+        try:
+            subprocess.run([sys.executable, str(script_path)], check=True)
+        except subprocess.CalledProcessError as exc:
+            status = f"Failed (code {exc.returncode})"
+        except Exception as exc:  # pragma: no cover - GUI feedback path
+            status = f"Error: {exc}"
+        else:
+            status = "Completed"
+
+        def finalize():
+            global is_scanning
+            scan_status_var.set(status)
+            scan_button.config(state="normal")
+            is_scanning = False
+
+        root.after(0, finalize)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 def flatten_yf_columns(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -338,6 +376,7 @@ def sort_treeview(tree, col, descending=False):
 
 def setup_layout():
     global tree, chart_frame, symbol_var, qty_var, entry_var, sl_var, total_value_var, order_tree
+    global scan_status_var, scan_button
 
     last_edited = {"field": None}
 
@@ -383,7 +422,10 @@ def setup_layout():
         last_edited["field"] = field_name
 
     top = tk.Frame(root); top.pack(fill="x", padx=10, pady=5)
-    tk.Button(top, text="Run scan_eod.py", command=run_scan).pack(side="left")
+    scan_status_var = tk.StringVar(value="Idle")
+    scan_button = tk.Button(top, text="Pattern Scanner", command=run_scan)
+    scan_button.pack(side="left")
+    tk.Label(top, textvariable=scan_status_var).pack(side="left", padx=10)
     tk.Button(top, text="Reload Watchlist", command=refresh_watchlist).pack(side="right", padx=5)
 
     tree_frame = tk.Frame(root); tree_frame.pack(fill="x", padx=10)
