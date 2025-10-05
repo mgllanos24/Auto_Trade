@@ -437,8 +437,6 @@ def setup_layout():
     ttk.Scrollbar(order_frame, orient="vertical", command=order_tree.yview).pack(side="right", fill="y")
 
     controls = tk.Frame(root); controls.pack(fill="x", padx=10, pady=5)
-    tk.Button(controls, text="Download All Data", command=download_all_data).pack(side="left", padx=5)
-    tk.Button(controls, text="Show Candlestick Chart", command=show_candlestick).pack(side="left", padx=5)
     tk.Button(controls, text="Delete from Watchlist", command=lambda: tree.delete(*tree.selection())).pack(side="left", padx=5)
     tk.Button(controls, text="Delete Selected Order", command=delete_selected_order).pack(side="left", padx=5)
     tk.Button(controls, text="Reload Active Monitors", command=rerun_stop_loss_monitors).pack(side="left", padx=5)
