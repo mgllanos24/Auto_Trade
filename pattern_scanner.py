@@ -157,11 +157,28 @@ def detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2):
     closes = df['close'].tail(window).values
     x = np.arange(len(lows)).reshape(-1, 1)
 
-    # Step 1: Identify flat resistance level
-    resistance = max(highs[-20:])
-    resistance_touches = [i for i in range(-20, 0)
-                          if abs(highs[i] - resistance) / resistance < tolerance]
-    
+    if len(highs) < min_touches + 2:
+        return False
+
+    # Step 1: Identify flat resistance level using highs prior to the most recent candles
+    plateau_end = len(highs) - 2 if len(highs) > 2 else len(highs)
+    if plateau_end <= 0:
+        return False
+
+    plateau_span = min(20, plateau_end)
+    plateau_start = plateau_end - plateau_span
+    plateau_highs = highs[plateau_start:plateau_end]
+
+    if plateau_highs.size == 0:
+        return False
+
+    resistance = plateau_highs.max()
+    if resistance == 0:
+        return False
+
+    resistance_touches = [idx for idx in range(plateau_start, plateau_end)
+                          if abs(highs[idx] - resistance) / resistance < tolerance]
+
     if len(resistance_touches) < min_touches:
         return False
 
@@ -178,9 +195,10 @@ def detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2):
     if support_touches < min_touches:
         return False
 
-    # Step 4 (optional): Check for breakout
-    breakout = closes[-1] > resistance * (1 + tolerance)
-    
+    # Step 4 (optional): Check for breakout relative to the plateau resistance
+    breakout = (closes[-1] > resistance * (1 + tolerance)) or \
+               (highs[-1] > resistance * (1 + tolerance))
+
     return breakout or True  # Return True even if no breakout yet
 
 
@@ -409,6 +427,24 @@ def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
         writer.writerow(header)
         writer.writerows(sorted(existing.values(), key=lambda x: x[0]))
 
+
+def _demo_ascending_triangle_detection():
+    """Demonstrate ascending triangle detection on synthetic data."""
+    highs = [10.0, 10.2, 10.4, 10.6, 11.0, 10.95, 11.0, 11.5]
+    lows = [9.5, 9.6, 9.7, 9.85, 9.9, 10.1, 10.2, 10.8]
+    closes = [9.8, 10.0, 10.2, 10.5, 10.9, 10.8, 10.95, 11.4]
+    volume = [1_000_000] * len(highs)
+
+    df = pd.DataFrame({
+        'high': highs,
+        'low': lows,
+        'close': closes,
+        'volume': volume
+    })
+
+    pattern_detected = detect_ascending_triangle(df, window=len(df), tolerance=0.02, min_touches=2)
+    print("Synthetic ascending triangle detected:", pattern_detected)
+
 def scan_all_symbols(symbols):
     disqualified = []
     for symbol in symbols:
@@ -481,6 +517,7 @@ def scan_all_symbols(symbols):
         print(f"\n Saved disqualified symbols to disqualified.csv")
 
 if __name__ == '__main__':
+    _demo_ascending_triangle_detection()
     try:
         with open('filtered_symbols.txt', 'r') as f:
             symbols = [line.strip() for line in f.readlines()]
