@@ -10,6 +10,8 @@ from datetime import datetime
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import List
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -28,6 +30,108 @@ def flatten_yf_columns(df):
         df.columns = [col[0] for col in df.columns]
     return df
 
+@dataclass
+class DoubleBottomHit:
+    left_date: pd.Timestamp
+    right_date: pd.Timestamp
+    support: float
+    neckline: float
+    bounce_pct: float
+    volume_confirmation: bool
+
+
+def _local_minima(series: pd.Series, order: int = 5) -> np.ndarray:
+    if series is None or len(series) < order * 2 + 1:
+        return np.array([], dtype=int)
+    return argrelextrema(series.values, np.less_equal, order=order)[0]
+
+
+def _local_max_between(series: pd.Series, start: int, end: int):
+    if end <= start:
+        return None, None
+    window = series.iloc[start:end + 1]
+    if window.empty:
+        return None, None
+    relative_idx = int(np.argmax(window.values))
+    absolute_idx = start + relative_idx
+    return absolute_idx, series.iloc[absolute_idx]
+
+
+def scan_double_bottoms(
+    df: pd.DataFrame,
+    lookback: int = 120,
+    order: int = 5,
+    tolerance: float = 0.03,
+    min_bounce: float = 0.05,
+    min_spacing: int = 5,
+    min_volume_ratio: float = 1.2,
+) -> List[DoubleBottomHit]:
+    if df is None or df.empty:
+        return []
+
+    recent = df.tail(lookback).copy()
+    if recent.empty or recent[['low', 'high', 'close', 'volume']].isnull().any().any():
+        return []
+
+    lows = recent['low']
+    highs = recent['high']
+    volumes = recent['volume']
+
+    minima = _local_minima(lows, order=order)
+    if minima.size < 2:
+        return []
+
+    hits: List[DoubleBottomHit] = []
+    for i in range(len(minima) - 1):
+        left = minima[i]
+        right = minima[i + 1]
+
+        if right - left < min_spacing:
+            continue
+
+        left_low = lows.iloc[left]
+        right_low = lows.iloc[right]
+        support = float(np.mean([left_low, right_low]))
+
+        if support == 0 or abs(left_low - right_low) / support > tolerance:
+            continue
+
+        neckline_idx, neckline_val = _local_max_between(highs, left, right)
+        if neckline_idx is None:
+            continue
+
+        bounce_pct = (neckline_val - support) / support
+        if bounce_pct < min_bounce:
+            continue
+
+        post_right = recent.iloc[right + 1:]
+        avg_volume_window = volumes.iloc[max(0, right - 20):right + 1]
+        avg_volume = avg_volume_window.mean() if not avg_volume_window.empty else volumes.mean()
+        breakout_volume = post_right['volume'].iloc[0] if not post_right.empty else volumes.iloc[right]
+        volume_confirmation = bool(
+            avg_volume > 0 and breakout_volume > avg_volume * min_volume_ratio
+        )
+
+        hits.append(
+            DoubleBottomHit(
+                left_date=recent.index[left],
+                right_date=recent.index[right],
+                support=float(support),
+                neckline=float(neckline_val),
+                bounce_pct=float(bounce_pct),
+                volume_confirmation=volume_confirmation,
+            )
+        )
+
+    return hits
+
+
+def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
+    if not hits:
+        return pd.DataFrame()
+    return pd.DataFrame([hit.__dict__ for hit in hits])
+
+
 def get_yf_data(symbol):
     try:
         df = yf.download(symbol, period='1y', interval='1d', progress=False, auto_adjust=False)
@@ -39,7 +143,8 @@ def get_yf_data(symbol):
         df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         if df[['high', 'low', 'close', 'volume']].isnull().any().any():
             return pd.DataFrame()
-        return df[['Date', 'open', 'high', 'low', 'close', 'volume']]
+        df.set_index('Date', inplace=True)
+        return df[['open', 'high', 'low', 'close', 'volume']]
     except Exception:
         return pd.DataFrame()
 
@@ -109,33 +214,13 @@ def is_uptrend(df):
     return pass_count >= 3
 
 def detect_double_bottom(df, window=60, tolerance=0.03, min_bounce=0.03):
-    """Detect a double bottom pattern in the recent price action."""
-    recent = df.tail(min(window, 60))
-    lows = recent['low'].values
-    highs = recent['high'].values
-
-    # Identify local minima (potential bottoms)
-    troughs, _ = find_peaks(-lows, distance=5)
-    if len(troughs) < 2:
-        return False
-
-    # Use the last two troughs for the pattern
-    left_idx, right_idx = troughs[-2], troughs[-1]
-    if right_idx - left_idx < 5:
-        return False
-
-    left_low, right_low = lows[left_idx], lows[right_idx]
-
-    # Bottoms should be within the tolerance band
-    if abs(left_low - right_low) / max(left_low, right_low) > tolerance:
-        return False
-
-    # Ensure there is a meaningful bounce between the two lows
-    mid_high = highs[left_idx:right_idx + 1].max()
-    if (mid_high - min(left_low, right_low)) / min(left_low, right_low) < min_bounce:
-        return False
-
-    return True
+    hits = scan_double_bottoms(
+        df,
+        lookback=window,
+        tolerance=tolerance,
+        min_bounce=min_bounce,
+    )
+    return hits[0] if hits else False
 
 def detect_inverse_head_shoulders(df):
     lows = df['low'].tail(60).values
@@ -481,8 +566,17 @@ def scan_all_symbols(symbols):
             df = get_yf_data(symbol)
             entry = df['close'].iloc[-1]
 
-            if detect_double_bottom(df, window=60):
+            double_bottom_hit = detect_double_bottom(df, window=60)
+            if double_bottom_hit:
                 pattern = "Double Bottom"
+                if isinstance(double_bottom_hit, DoubleBottomHit):
+                    print(
+                        "  Double Bottom details → "
+                        f"Support: {double_bottom_hit.support:.2f}, "
+                        f"Neckline: {double_bottom_hit.neckline:.2f}, "
+                        f"Bounce: {double_bottom_hit.bounce_pct * 100:.1f}%, "
+                        f"Volume Confirmed: {double_bottom_hit.volume_confirmation}"
+                    )
             elif detect_inverse_head_shoulders(df):
                 pattern = "Inverse Head and Shoulders"
             elif detect_ascending_triangle(df):
