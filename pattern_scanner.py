@@ -40,6 +40,16 @@ class DoubleBottomHit:
     volume_confirmation: bool
 
 
+@dataclass
+class CupHandleHit:
+    resistance: float
+    cup_depth: float
+    cup_depth_pct: float
+    handle_length: int
+    handle_pullback_pct: float
+    handle_slope: float
+
+
 def _local_minima(series: pd.Series, order: int = 5) -> np.ndarray:
     if series is None or len(series) < order * 2 + 1:
         return np.array([], dtype=int)
@@ -375,39 +385,70 @@ def detect_bullish_rectangle(df, window=60, tolerance=0.02, min_touches=2):
 
     return True
 
-def detect_cup_and_handle(df, cup_window=60, handle_window=15, tolerance=0.1):
+def detect_cup_and_handle(
+    df,
+    cup_window: int = 60,
+    handle_window: int = 15,
+    tolerance: float = 0.1,
+) -> List[CupHandleHit]:
     if len(df) < cup_window + handle_window:
-        return False
+        return []
 
-    cup = df['close'].iloc[-(cup_window + handle_window):-handle_window].values
-    handle = df['close'].tail(handle_window).values
+    closes = df['close']
+    cup = closes.iloc[-(cup_window + handle_window):-handle_window].values
+    handle = closes.tail(handle_window).values
+
+    if cup.size == 0 or handle.size < 2:
+        return []
+
     midpoint = len(cup) // 2
     left = cup[:midpoint]
     right = cup[midpoint:]
 
-    # 1. Cup shape: left & right similar, U-shaped dip
-    min_cup = np.min(cup)
-    left_peak = np.max(left)
-    right_peak = np.max(right)
+    if left.size == 0 or right.size == 0:
+        return []
 
-    # Left and right sides should recover close to each other
-    if abs(left_peak - right_peak) / max(left_peak, right_peak) > tolerance:
-        return False
+    min_cup = float(np.min(cup))
+    left_peak = float(np.max(left))
+    right_peak = float(np.max(right))
 
-    # Cup should dip significantly
-    if (left_peak - min_cup) / left_peak < 0.1 or (right_peak - min_cup) / right_peak < 0.1:
-        return False
+    resistance = float(max(left_peak, right_peak))
+    if resistance == 0:
+        return []
 
-    # 2. Handle: slight downward drift after right cup
+    if abs(left_peak - right_peak) / resistance > tolerance:
+        return []
+
+    depth_left = (left_peak - min_cup) / left_peak if left_peak else 0
+    depth_right = (right_peak - min_cup) / right_peak if right_peak else 0
+    if depth_left < 0.1 or depth_right < 0.1:
+        return []
+
     x = np.arange(len(handle)).reshape(-1, 1)
     model = LinearRegression().fit(x, handle)
-    handle_slope = model.coef_[0]
+    handle_slope = float(model.coef_[0])
 
-    # Slope should be slightly negative (falling handle)
     if not (-0.2 < handle_slope < 0):
-        return False
+        return []
 
-    return True
+    handle_start = float(handle[0])
+    handle_low = float(np.min(handle))
+    handle_length = int(len(handle))
+    handle_pullback_pct = (handle_start - handle_low) / handle_start if handle_start else 0.0
+
+    cup_depth = resistance - min_cup
+    cup_depth_pct = cup_depth / resistance if resistance else 0.0
+
+    hit = CupHandleHit(
+        resistance=resistance,
+        cup_depth=float(cup_depth),
+        cup_depth_pct=float(cup_depth_pct),
+        handle_length=handle_length,
+        handle_pullback_pct=float(handle_pullback_pct),
+        handle_slope=handle_slope,
+    )
+
+    return [hit]
 
 def detect_rounding_bottom(df, window=100, tolerance=0.02):
     if len(df) < window:
@@ -565,6 +606,7 @@ def scan_all_symbols(symbols):
         try:
             df = get_yf_data(symbol)
             entry = df['close'].iloc[-1]
+            pattern_details = None
 
             double_bottom_hit = detect_double_bottom(df, window=60)
             if double_bottom_hit:
@@ -587,8 +629,18 @@ def scan_all_symbols(symbols):
                 pattern = "Bullish Flag"
             elif detect_bullish_rectangle(df):
                 pattern = "Bullish Rectangle"
-            elif detect_cup_and_handle(df):
+            elif (cup_hits := detect_cup_and_handle(df)):
                 pattern = "Cup and Handle"
+                cup_hit = cup_hits[0]
+                pattern_details = cup_hit
+                print(
+                    "  Cup & Handle details → "
+                    f"Resistance: {cup_hit.resistance:.2f}, "
+                    f"Cup depth: {cup_hit.cup_depth:.2f} ({cup_hit.cup_depth_pct * 100:.1f}%), "
+                    f"Handle length: {cup_hit.handle_length}, "
+                    f"Handle pullback: {cup_hit.handle_pullback_pct * 100:.1f}%, "
+                    f"Handle slope: {cup_hit.handle_slope:.4f}"
+                )
             elif detect_rounding_bottom(df):
                 pattern = "Rounding Bottom"
             elif detect_breakaway_gap(df):
