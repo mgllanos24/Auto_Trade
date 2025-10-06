@@ -92,8 +92,8 @@ def scan_double_bottoms(
     if df is None or df.empty:
         return []
 
-    required_cols = {"high", "low", "close", "volume"}
-    if not required_cols.issubset(df.columns):
+    required_cols = ["high", "low", "close", "volume"]
+    if not set(required_cols).issubset(df.columns):
         return []
 
     n_rows = len(df)
