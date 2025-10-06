@@ -28,6 +28,17 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WATCHLIST_PATH = SCRIPT_DIR / 'watchlist.csv'
+WATCHLIST_HEADER = [
+    'symbol',
+    'breakout_high',
+    'rr_ratio',
+    'stop_loss',
+    'target_price',
+    'timestamp',
+    'direction',
+    'pattern',
+    '3mo_volume'
+]
 
 SWING_CONFIG = SwingScreenerConfig()
 
@@ -406,18 +417,6 @@ def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
         volume_3mo
     ]
 
-    header = [
-        'symbol',
-        'breakout_high',
-        'rr_ratio',
-        'stop_loss',
-        'target_price',
-        'timestamp',
-        'direction',
-        'pattern',
-        '3mo_volume'
-    ]
-
     if path.exists():
         with open(path, 'r') as f:
             reader = csv.reader(f)
@@ -430,8 +429,15 @@ def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(header)
+        writer.writerow(WATCHLIST_HEADER)
         writer.writerows(sorted(existing.values(), key=lambda x: x[0]))
+
+
+def initialize_watchlist():
+    """Create or reset the watchlist file with only the header."""
+    with open(WATCHLIST_PATH, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(WATCHLIST_HEADER)
 
 
 def _demo_ascending_triangle_detection():
@@ -452,6 +458,7 @@ def _demo_ascending_triangle_detection():
     print("Synthetic ascending triangle detected:", pattern_detected)
 
 def scan_all_symbols(symbols):
+    initialize_watchlist()
     disqualified = []
     for symbol in symbols:
         print(f"\n Scanning {symbol}...")
