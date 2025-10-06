@@ -397,10 +397,8 @@ def refresh_watchlist():
 
             if not shared_found:
                 if os.path.exists(local_watchlist):
-                    messagebox.showinfo(
-                        "Reload Watchlist",
-                        "Shared watchlist not found. Using existing local copy.",
-                    )
+                    print(
+                        "[Watchlist] Shared watchlist not found. Using existing local copy.")
                 else:
                     messagebox.showerror(
                         "Reload Watchlist",
