@@ -259,6 +259,7 @@ def show_candlestick():
     import matplotlib.dates as mdates
     import matplotlib.ticker as mticker
     import numpy as np
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     sel = tree.selection()
     if not sel:
@@ -295,12 +296,13 @@ def show_candlestick():
     norm_vol = volume_by_price / volume_by_price.max()
 
     fig = plt.figure(figsize=(12, 6))
-    gs = fig.add_gridspec(3, 2, width_ratios=[1.2, 4], height_ratios=[3, 1, 1], wspace=0.05)
+    gs = fig.add_gridspec(3, 1, height_ratios=[3, 1, 1], hspace=0.05)
 
-    ax_price = fig.add_subplot(gs[0, 1])
-    ax_vp = fig.add_subplot(gs[:, 0], sharey=ax_price)
-    ax_volume = fig.add_subplot(gs[1, 1], sharex=ax_price)
-    ax_rsi = fig.add_subplot(gs[2, 1], sharex=ax_price)
+    ax_price = fig.add_subplot(gs[0, 0])
+    divider = make_axes_locatable(ax_price)
+    ax_vp = divider.append_axes("right", size=1.2, pad=0.05, sharey=ax_price)
+    ax_volume = fig.add_subplot(gs[1, 0], sharex=ax_price)
+    ax_rsi = fig.add_subplot(gs[2, 0], sharex=ax_price)
 
     for t, o, h, l, c in ohlc:
         color = 'green' if c >= o else 'red'
@@ -310,8 +312,7 @@ def show_candlestick():
     ax_vp.barh(volume_by_price.index, norm_vol, height=bin_size * 0.9, color='gray')
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
-    ax_vp.invert_xaxis()
-    ax_vp.tick_params(axis='y', labelleft=True, left=True, labelright=False, right=False)
+    ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
 
     volume_colors = ['green' if c >= o else 'red' for o, c in zip(df['Open'], df['Close'])]
     ax_volume.bar(df['Date'], df['Volume'], width=0.6, color=volume_colors, align='center')
