@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from typing import List
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
+from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -293,40 +294,6 @@ def detect_bullish_rectangle(df, window=60, tolerance=0.02, min_touches=2):
 
     return True
 
-def detect_cup_and_handle(df, cup_window=60, handle_window=15, tolerance=0.1):
-    if len(df) < cup_window + handle_window:
-        return False
-
-    cup = df['close'].iloc[-(cup_window + handle_window):-handle_window].values
-    handle = df['close'].tail(handle_window).values
-    midpoint = len(cup) // 2
-    left = cup[:midpoint]
-    right = cup[midpoint:]
-
-    # 1. Cup shape: left & right similar, U-shaped dip
-    min_cup = np.min(cup)
-    left_peak = np.max(left)
-    right_peak = np.max(right)
-
-    # Left and right sides should recover close to each other
-    if abs(left_peak - right_peak) / max(left_peak, right_peak) > tolerance:
-        return False
-
-    # Cup should dip significantly
-    if (left_peak - min_cup) / left_peak < 0.1 or (right_peak - min_cup) / right_peak < 0.1:
-        return False
-
-    # 2. Handle: slight downward drift after right cup
-    x = np.arange(len(handle)).reshape(-1, 1)
-    model = LinearRegression().fit(x, handle)
-    handle_slope = model.coef_[0]
-
-    # Slope should be slightly negative (falling handle)
-    if not (-0.2 < handle_slope < 0):
-        return False
-
-    return True
-
 def detect_rounding_bottom(df, window=100, tolerance=0.02):
     if len(df) < window:
         return False
@@ -497,26 +464,37 @@ def scan_all_symbols(symbols):
                         f"Breakout: {double_bottom_hit.breakout}, "
                         f"Volume Contracted: {double_bottom_hit.volume_contracted}"
                     )
-            elif detect_inverse_head_shoulders(df):
-                pattern = "Inverse Head and Shoulders"
-            elif detect_ascending_triangle(df):
-                pattern = "Ascending Triangle"
-            elif detect_bullish_pennant(df):
-                pattern = "Bullish Pennant"
-            elif detect_bullish_flag(df):
-                pattern = "Bullish Flag"
-            elif detect_bullish_rectangle(df):
-                pattern = "Bullish Rectangle"
-            elif detect_cup_and_handle(df):
-                pattern = "Cup and Handle"
-            elif detect_rounding_bottom(df):
-                pattern = "Rounding Bottom"
-            elif detect_breakaway_gap(df):
-                pattern = "Breakaway Gap"
             else:
-                print(" Skipped: No pattern matched")
-                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
-                continue
+                cup_handle_hit = detect_cup_and_handle(df)
+                if cup_handle_hit:
+                    pattern = "Cup and Handle"
+                    if isinstance(cup_handle_hit, CupHandleHit):
+                        print(
+                            "  Cup and Handle details → "
+                            f"Resistance: {cup_handle_hit.resistance:.2f}, "
+                            f"Cup Depth: {cup_handle_hit.cup_depth:.2f} ({cup_handle_hit.cup_depth_pct * 100:.1f}%), "
+                            f"Handle Length: {cup_handle_hit.handle_length}, "
+                            f"Handle Pullback: {cup_handle_hit.handle_pullback_pct * 100:.1f}%, "
+                            f"Handle Slope: {cup_handle_hit.handle_slope:.4f}"
+                        )
+                elif detect_inverse_head_shoulders(df):
+                    pattern = "Inverse Head and Shoulders"
+                elif detect_ascending_triangle(df):
+                    pattern = "Ascending Triangle"
+                elif detect_bullish_pennant(df):
+                    pattern = "Bullish Pennant"
+                elif detect_bullish_flag(df):
+                    pattern = "Bullish Flag"
+                elif detect_bullish_rectangle(df):
+                    pattern = "Bullish Rectangle"
+                elif detect_rounding_bottom(df):
+                    pattern = "Rounding Bottom"
+                elif detect_breakaway_gap(df):
+                    pattern = "Breakaway Gap"
+                else:
+                    print(" Skipped: No pattern matched")
+                    disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
+                    continue
 
             if df.empty:
                 print(" Skipped: Bad or insufficient data")
