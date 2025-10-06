@@ -15,6 +15,11 @@ from typing import List
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
+from swing_trading_screener import (
+    SwingCandidate,
+    SwingScreenerConfig,
+    evaluate_swing_setup,
+)
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -23,6 +28,8 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WATCHLIST_PATH = SCRIPT_DIR / 'watchlist.csv'
+
+SWING_CONFIG = SwingScreenerConfig()
 
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
@@ -454,6 +461,19 @@ def scan_all_symbols(symbols):
         try:
             df = get_yf_data(symbol)
             entry = df['close'].iloc[-1]
+
+            swing_candidate = evaluate_swing_setup(symbol, df, SWING_CONFIG)
+            if isinstance(swing_candidate, SwingCandidate):
+                print(
+                    " Swing setup qualified → "
+                    f"Trend Strength: {swing_candidate.trend_strength:.2%}, "
+                    f"Momentum: {swing_candidate.momentum_score:.2%}, "
+                    f"ATR%: {swing_candidate.atr_pct:.2%}, "
+                    f"RSI: {swing_candidate.rsi:.1f}, "
+                    f"Pullback: {swing_candidate.pullback_pct:.2%}"
+                )
+            else:
+                print(" Swing setup did not meet the screener criteria")
 
             double_bottom_hit = detect_double_bottom(df, window=60)
             if double_bottom_hit:
