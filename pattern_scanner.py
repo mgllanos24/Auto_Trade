@@ -11,7 +11,7 @@ from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -40,10 +40,40 @@ class DoubleBottomHit:
     volume_confirmation: bool
 
 
+@dataclass
+class CupHandleHit:
+    cup_start: pd.Timestamp
+    cup_low: pd.Timestamp
+    cup_end: pd.Timestamp
+    handle_start: pd.Timestamp
+    handle_end: pd.Timestamp
+    pivot_price: float
+    depth_pct: float
+    handle_pullback_pct: float
+    cup_duration: int
+    handle_duration: int
+    handle_slope: float
+    volume_ratio: Optional[float]
+
+
 def _local_minima(series: pd.Series, order: int = 5) -> np.ndarray:
     if series is None or len(series) < order * 2 + 1:
         return np.array([], dtype=int)
     return argrelextrema(series.values, np.less_equal, order=order)[0]
+
+
+def _local_maxima(series: pd.Series, order: int = 5) -> np.ndarray:
+    if series is None or len(series) < order * 2 + 1:
+        return np.array([], dtype=int)
+    return argrelextrema(series.values, np.greater_equal, order=order)[0]
+
+
+def _linreg_slope(series: pd.Series) -> float:
+    if series is None or series.empty:
+        return 0.0
+    X = np.arange(len(series)).reshape(-1, 1)
+    model = LinearRegression().fit(X, series.values)
+    return float(model.coef_[0])
 
 
 def _local_max_between(series: pd.Series, start: int, end: int):
@@ -126,7 +156,127 @@ def scan_double_bottoms(
     return hits
 
 
-def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
+def scan_cup_handle_prebreakout(
+    df: pd.DataFrame,
+    lookback: int = 180,
+    rim_tolerance: float = 0.06,
+    min_cup_duration: int = 30,
+    max_cup_duration: int = 120,
+    min_cup_depth: float = 0.12,
+    max_cup_depth: float = 0.55,
+    min_handle_duration: int = 3,
+    max_handle_duration: int = 25,
+    max_handle_pullback: float = 0.12,
+    handle_slope_min: float = -0.15,
+    handle_slope_max: float = 0.08,
+    volume_ratio_threshold: float = 0.75,
+    breakout_buffer: float = 0.015,
+) -> List[CupHandleHit]:
+    if df is None or df.empty:
+        return []
+
+    recent = df.tail(lookback).copy()
+    if recent.empty or recent[['close', 'high', 'low']].isnull().any().any():
+        return []
+
+    closes = recent['close']
+    volumes = recent['volume'] if 'volume' in recent.columns else None
+
+    maxima = _local_maxima(closes, order=5)
+    minima = _local_minima(closes, order=5)
+
+    if minima.size == 0 or maxima.size < 2:
+        return []
+
+    hits: List[CupHandleHit] = []
+    for trough in minima:
+        left_candidates = maxima[maxima < trough]
+        right_candidates = maxima[maxima > trough]
+
+        if left_candidates.size == 0 or right_candidates.size == 0:
+            continue
+
+        left_idx = int(left_candidates[-1])
+        right_idx = int(right_candidates[0])
+
+        cup_duration = right_idx - left_idx
+        if cup_duration < min_cup_duration or cup_duration > max_cup_duration:
+            continue
+
+        left_peak = closes.iloc[left_idx]
+        right_peak = closes.iloc[right_idx]
+        cup_low_price = closes.iloc[trough]
+
+        rim_ref = np.mean([left_peak, right_peak])
+        if rim_ref == 0:
+            continue
+
+        rim_symmetry = abs(left_peak - right_peak) / rim_ref
+        if rim_symmetry > rim_tolerance:
+            continue
+
+        depth_pct = (rim_ref - cup_low_price) / rim_ref
+        if depth_pct < min_cup_depth or depth_pct > max_cup_depth:
+            continue
+
+        handle_start_idx = right_idx + 1
+        if handle_start_idx >= len(recent) - 1:
+            continue
+
+        handle_prices = closes.iloc[handle_start_idx:]
+        handle_duration = len(handle_prices) - 1
+        if handle_duration < min_handle_duration or handle_duration > max_handle_duration:
+            continue
+
+        handle_low_price = handle_prices.min()
+        pivot_price = min(left_peak, right_peak)
+
+        handle_pullback_pct = (pivot_price - handle_low_price) / pivot_price
+        if handle_pullback_pct > max_handle_pullback:
+            continue
+
+        handle_high_price = handle_prices.max()
+        if handle_high_price >= pivot_price * (1 + breakout_buffer):
+            continue
+
+        final_close = closes.iloc[-1]
+        if final_close < pivot_price * (1 - breakout_buffer):
+            continue
+
+        handle_slope = _linreg_slope(handle_prices.reset_index(drop=True))
+        if not (handle_slope_min <= handle_slope <= handle_slope_max):
+            continue
+
+        volume_ratio: Optional[float] = None
+        if volumes is not None and not volumes.empty:
+            cup_volume = volumes.iloc[left_idx:right_idx + 1].mean()
+            handle_volume = volumes.iloc[handle_start_idx:].mean()
+            if cup_volume > 0:
+                volume_ratio = float(handle_volume / cup_volume) if handle_volume is not None else None
+                if volume_ratio is not None and volume_ratio > volume_ratio_threshold:
+                    continue
+
+        hits.append(
+            CupHandleHit(
+                cup_start=recent.index[left_idx],
+                cup_low=recent.index[trough],
+                cup_end=recent.index[right_idx],
+                handle_start=recent.index[handle_start_idx],
+                handle_end=recent.index[-1],
+                pivot_price=float(pivot_price),
+                depth_pct=float(depth_pct),
+                handle_pullback_pct=float(handle_pullback_pct),
+                cup_duration=int(cup_duration),
+                handle_duration=int(handle_duration),
+                handle_slope=float(handle_slope),
+                volume_ratio=volume_ratio,
+            )
+        )
+
+    return hits
+
+
+def hits_to_dataframe(hits: List[object]) -> pd.DataFrame:
     if not hits:
         return pd.DataFrame()
     return pd.DataFrame([hit.__dict__ for hit in hits])
@@ -375,39 +525,16 @@ def detect_bullish_rectangle(df, window=60, tolerance=0.02, min_touches=2):
 
     return True
 
-def detect_cup_and_handle(df, cup_window=60, handle_window=15, tolerance=0.1):
-    if len(df) < cup_window + handle_window:
-        return False
+def detect_cup_and_handle(
+    df: pd.DataFrame,
+    return_hits: bool = False,
+    **scan_kwargs,
+):
+    for legacy_key in ('cup_window', 'handle_window', 'tolerance'):
+        scan_kwargs.pop(legacy_key, None)
 
-    cup = df['close'].iloc[-(cup_window + handle_window):-handle_window].values
-    handle = df['close'].tail(handle_window).values
-    midpoint = len(cup) // 2
-    left = cup[:midpoint]
-    right = cup[midpoint:]
-
-    # 1. Cup shape: left & right similar, U-shaped dip
-    min_cup = np.min(cup)
-    left_peak = np.max(left)
-    right_peak = np.max(right)
-
-    # Left and right sides should recover close to each other
-    if abs(left_peak - right_peak) / max(left_peak, right_peak) > tolerance:
-        return False
-
-    # Cup should dip significantly
-    if (left_peak - min_cup) / left_peak < 0.1 or (right_peak - min_cup) / right_peak < 0.1:
-        return False
-
-    # 2. Handle: slight downward drift after right cup
-    x = np.arange(len(handle)).reshape(-1, 1)
-    model = LinearRegression().fit(x, handle)
-    handle_slope = model.coef_[0]
-
-    # Slope should be slightly negative (falling handle)
-    if not (-0.2 < handle_slope < 0):
-        return False
-
-    return True
+    hits = scan_cup_handle_prebreakout(df, **scan_kwargs)
+    return hits if return_hits else bool(hits)
 
 def detect_rounding_bottom(df, window=100, tolerance=0.02):
     if len(df) < window:
