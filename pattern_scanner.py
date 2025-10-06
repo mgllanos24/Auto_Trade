@@ -10,9 +10,10 @@ from datetime import datetime
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
-from typing import List
+from typing import List, Optional, Union
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
+from cup_handle_scanner import CupHandleHit, scan_cup_handle
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -293,39 +294,34 @@ def detect_bullish_rectangle(df, window=60, tolerance=0.02, min_touches=2):
 
     return True
 
-def detect_cup_and_handle(df, cup_window=60, handle_window=15, tolerance=0.1):
-    if len(df) < cup_window + handle_window:
-        return False
+def detect_cup_and_handle(
+    df,
+    cup_window: int = 60,
+    handle_window: int = 15,
+    tolerance: float = 0.1,
+    *,
+    require_breakout: bool = False,
+    return_hit: bool = False,
+) -> Union[bool, Optional[CupHandleHit]]:
+    """Identify cup and handle formations using :func:`scan_cup_handle`.
 
-    cup = df['close'].iloc[-(cup_window + handle_window):-handle_window].values
-    handle = df['close'].tail(handle_window).values
-    midpoint = len(cup) // 2
-    left = cup[:midpoint]
-    right = cup[midpoint:]
+    Legacy callers receive a boolean signal while new integrations can request
+    the structured :class:`CupHandleHit` metadata by passing ``return_hit=True``.
+    """
 
-    # 1. Cup shape: left & right similar, U-shaped dip
-    min_cup = np.min(cup)
-    left_peak = np.max(left)
-    right_peak = np.max(right)
+    hits = scan_cup_handle(
+        df,
+        cup_window=cup_window,
+        handle_window=handle_window,
+        tolerance=tolerance,
+        require_breakout=require_breakout,
+    )
 
-    # Left and right sides should recover close to each other
-    if abs(left_peak - right_peak) / max(left_peak, right_peak) > tolerance:
-        return False
+    if not hits:
+        return None if return_hit else False
 
-    # Cup should dip significantly
-    if (left_peak - min_cup) / left_peak < 0.1 or (right_peak - min_cup) / right_peak < 0.1:
-        return False
-
-    # 2. Handle: slight downward drift after right cup
-    x = np.arange(len(handle)).reshape(-1, 1)
-    model = LinearRegression().fit(x, handle)
-    handle_slope = model.coef_[0]
-
-    # Slope should be slightly negative (falling handle)
-    if not (-0.2 < handle_slope < 0):
-        return False
-
-    return True
+    best_hit = max(hits, key=lambda hit: hit.cup_depth_pct)
+    return best_hit if return_hit else True
 
 def detect_rounding_bottom(df, window=100, tolerance=0.02):
     if len(df) < window:
