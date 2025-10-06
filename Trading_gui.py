@@ -39,6 +39,11 @@ def is_crypto(symbol):
 def get_api(symbol):
     return live_api if is_crypto(symbol) else paper_api
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+WATCHLIST_PATH = SCRIPT_DIR / "watchlist.csv"
+DATA_DIR = SCRIPT_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 root = tk.Tk()
 root.title("Stock Scanner GUI")
 root.geometry("1400x900")
@@ -46,7 +51,7 @@ root.geometry("1400x900")
 symbol_data = {}
 _long_name_cache = {}
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
-MONITOR_FILE = "active_monitors.json"
+MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
 
 def save_active_monitor(iid):
     data = order_tree.item(iid)['values']
@@ -237,15 +242,15 @@ def flatten_yf_columns(df):
 
 def download_all_data():
     symbol_data.clear()
-    if not os.path.exists("watchlist.csv"):
+    if not WATCHLIST_PATH.exists():
         return
-    df = pd.read_csv("watchlist.csv")
+    df = pd.read_csv(WATCHLIST_PATH)
     for sym in df["symbol"]:
         try:
             data = yf.download(sym, period="12mo", progress=False)
             data = flatten_yf_columns(data)
             symbol_data[sym] = data
-            data.to_csv(f"data/{sym}.csv")
+            data.to_csv(DATA_DIR / f"{sym}.csv")
         except Exception as e:
             print(f"Download failed for {sym}: {e}")
 
@@ -259,9 +264,10 @@ def show_candlestick():
     if not sel:
         return
     sym = tree.item(sel[0])["values"][0]
+    data_file = DATA_DIR / f"{sym}.csv"
     if sym not in symbol_data:
-        if os.path.exists(f"data/{sym}.csv"):
-            symbol_data[sym] = pd.read_csv(f"data/{sym}.csv", index_col=0, parse_dates=True)
+        if data_file.exists():
+            symbol_data[sym] = pd.read_csv(data_file, index_col=0, parse_dates=True)
         else:
             df = yf.download(sym, period="12mo", auto_adjust=False, progress=False)
             df = flatten_yf_columns(df)
@@ -269,7 +275,7 @@ def show_candlestick():
                 messagebox.showinfo("Chart", f"No data available for {sym}.")
                 return
             symbol_data[sym] = df
-            df.to_csv(f"data/{sym}.csv")
+            df.to_csv(data_file)
 
     df = symbol_data[sym]
     for w in chart_frame.winfo_children():
@@ -363,40 +369,40 @@ def show_candlestick():
     canvas.get_tk_widget().pack(fill="both", expand=True)
 def load_watchlist():
     tree.delete(*tree.get_children())
-    if not os.path.exists("watchlist.csv"):
+    if not WATCHLIST_PATH.exists():
         return
-    df = pd.read_csv("watchlist.csv")
+    df = pd.read_csv(WATCHLIST_PATH)
     for _, row in df.iterrows():
         tree.insert("", "end", values=[row[col] for col in WATCHLIST_COLUMNS])
 
 def refresh_watchlist():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    transfer_script = os.path.join(script_dir, "transfer_watchlist.py")
-    local_watchlist = os.path.join(script_dir, "watchlist.csv")
+    script_dir = SCRIPT_DIR
+    transfer_script = script_dir / "transfer_watchlist.py"
+    local_watchlist = WATCHLIST_PATH
 
     try:
-        if os.path.exists(transfer_script):
-            subprocess.run([sys.executable, transfer_script], check=True, capture_output=True, text=True)
+        if transfer_script.exists():
+            subprocess.run([sys.executable, str(transfer_script)], check=True, capture_output=True, text=True)
         else:
             shared_dirs = []
             env_shared = os.getenv("WATCHLIST_SHARED_DIR")
             if env_shared:
-                shared_dirs.append(env_shared)
-            shared_dirs.append(os.path.join(script_dir, "shared"))
+                shared_dirs.append(Path(env_shared))
+            shared_dirs.append(script_dir / "shared")
 
             destination = local_watchlist
             shared_found = False
             for shared_dir in shared_dirs:
                 if not shared_dir:
                     continue
-                source = os.path.join(shared_dir, "watchlist.csv")
-                if os.path.exists(source):
+                source = Path(shared_dir) / "watchlist.csv"
+                if source.exists():
                     shutil.copy2(source, destination)
                     shared_found = True
                     break
 
             if not shared_found:
-                if os.path.exists(local_watchlist):
+                if local_watchlist.exists():
                     print(
                         "[Watchlist] Shared watchlist not found. Using existing local copy.")
                 else:
