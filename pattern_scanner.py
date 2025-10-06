@@ -7,6 +7,7 @@ import csv
 import time
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
@@ -19,6 +20,9 @@ API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
 BASE_URL = 'https://paper-api.alpaca.markets'
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+WATCHLIST_PATH = SCRIPT_DIR / 'watchlist.csv'
 
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
@@ -380,7 +384,7 @@ def calculate_rr_price_action(df, entry_price):
     return stop, target, rr
 
 def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
-    path = 'watchlist.csv'
+    path = WATCHLIST_PATH
     volume_3mo = int(df['volume'].tail(60).sum())
 
     new_entry = [
@@ -407,7 +411,7 @@ def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
         '3mo_volume'
     ]
 
-    if os.path.exists(path):
+    if path.exists():
         with open(path, 'r') as f:
             reader = csv.reader(f)
             next(reader, None)
