@@ -282,16 +282,23 @@ def show_candlestick():
     for w in chart_frame.winfo_children():
         w.destroy()
 
-    df['Date'] = mdates.date2num(df.index.to_pydatetime())
-    ohlc = df[['Date', 'Open', 'High', 'Low', 'Close']].dropna().values
+    price_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    plot_df = df[price_columns].dropna().copy()
+    if plot_df.empty:
+        messagebox.showinfo("Chart", f"No complete OHLC data available for {sym}.")
+        return
+
+    plot_df.sort_index(inplace=True)
+    plot_df['Date'] = mdates.date2num(plot_df.index.to_pydatetime())
+    ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
     bin_size = 1.0
-    price_min = df['Low'].min()
-    price_max = df['High'].max()
+    price_min = plot_df['Low'].min()
+    price_max = plot_df['High'].max()
     bins = np.arange(price_min, price_max + bin_size, bin_size)
     price_levels = 0.5 * (bins[1:] + bins[:-1])
-    df['price_bin'] = np.digitize(df['Close'], bins)
-    volume_by_price = df.groupby('price_bin')['Volume'].sum()
+    plot_df['price_bin'] = np.digitize(plot_df['Close'], bins)
+    volume_by_price = plot_df.groupby('price_bin')['Volume'].sum()
     volume_by_price.index = price_levels[volume_by_price.index - 1]
     norm_vol = volume_by_price / volume_by_price.max()
 
@@ -314,12 +321,12 @@ def show_candlestick():
     ax_vp.set_xlabel('Volume')
     ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
 
-    volume_colors = ['green' if c >= o else 'red' for o, c in zip(df['Open'], df['Close'])]
-    ax_volume.bar(df['Date'], df['Volume'], width=0.6, color=volume_colors, align='center')
+    volume_colors = ['green' if c >= o else 'red' for o, c in zip(plot_df['Open'], plot_df['Close'])]
+    ax_volume.bar(plot_df['Date'], plot_df['Volume'], width=0.6, color=volume_colors, align='center')
     ax_volume.set_ylabel('Volume')
     ax_volume.yaxis.set_label_position('right')
 
-    delta = df['Close'].diff()
+    delta = plot_df['Close'].diff()
     gains = delta.clip(lower=0)
     losses = -delta.clip(upper=0)
     avg_gain = gains.rolling(window=14, min_periods=14).mean()
@@ -331,7 +338,7 @@ def show_candlestick():
     rsi[(avg_loss == 0) & (avg_gain > 0)] = 100
     rsi[(avg_loss == 0) & (avg_gain == 0)] = 50
 
-    ax_rsi.plot(df['Date'], rsi, color='purple', linewidth=1)
+    ax_rsi.plot(plot_df['Date'], rsi, color='purple', linewidth=1)
     ax_rsi.axhline(70, color='red', linestyle='--', linewidth=1)
     ax_rsi.axhline(30, color='green', linestyle='--', linewidth=1)
     ax_rsi.set_ylim(0, 100)
@@ -349,6 +356,8 @@ def show_candlestick():
     ax_volume.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
     ax_rsi.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
     ax_rsi.set_xlabel('Date')
+    ax_price.set_xlim(plot_df['Date'].min() - 0.5, plot_df['Date'].max() + 0.5)
+
     long_name = _long_name_cache.get(sym)
     if long_name is None:
         try:
