@@ -298,6 +298,7 @@ def show_candlestick():
         min_spacing = 1.0
 
     candle_width = min_spacing * 0.6
+    volume_width = min_spacing * 0.8
 
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
@@ -378,7 +379,7 @@ def show_candlestick():
     ax_volume.bar(
         plot_df['Date'],
         plot_df['Volume'],
-        width=candle_width,
+        width=volume_width,
         color=volume_colors,
         align='center',
     )
