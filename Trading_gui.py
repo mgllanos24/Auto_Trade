@@ -259,6 +259,7 @@ def show_candlestick():
     import matplotlib.dates as mdates
     import matplotlib.ticker as mticker
     import numpy as np
+    from mplfinance.original_flavor import candlestick_ohlc
 
     sel = tree.selection()
     if not sel:
@@ -297,30 +298,40 @@ def show_candlestick():
         min_spacing = 1.0
 
     candle_width = min_spacing * 0.6
-    volume_width = min_spacing * 0.8
 
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
-    bin_size = 1.0
+    price_range = plot_df['High'].max() - plot_df['Low'].min()
+    if price_range == 0:
+        bin_size = max(plot_df['Close'].iloc[-1] * 0.005, 0.01)
+    else:
+        bin_size = max(price_range / 60, 0.01)
+
     price_min = plot_df['Low'].min()
     price_max = plot_df['High'].max()
     bins = np.arange(price_min, price_max + bin_size, bin_size)
+    if len(bins) < 2:
+        bins = np.array([price_min, price_min + bin_size])
+    elif bins[-1] < price_max:
+        bins = np.append(bins, bins[-1] + bin_size)
     price_levels = 0.5 * (bins[1:] + bins[:-1])
-    price_bins = np.digitize(plot_df['Close'], bins)
-    valid_mask = (price_bins > 0) & (price_bins <= len(price_levels))
-    volume_by_price = plot_df.loc[valid_mask].groupby(price_bins[valid_mask])['Volume'].sum()
-    if not volume_by_price.empty:
-        vp_indices = volume_by_price.index.to_numpy(dtype=int, copy=False)
-        volume_by_price.index = price_levels[vp_indices - 1]
-    max_vp_volume = volume_by_price.max() if not volume_by_price.empty else 0
-    norm_vol = volume_by_price / max_vp_volume if max_vp_volume else volume_by_price
+
+    price_bins = pd.cut(
+        plot_df['Close'],
+        bins=bins,
+        labels=price_levels,
+        include_lowest=True,
+    )
+    volume_by_price = plot_df.groupby(price_bins)['Volume'].sum().dropna()
+    volume_by_price.index = volume_by_price.index.astype(float)
+    volume_by_price = volume_by_price.sort_index()
 
     fig = plt.figure(figsize=(12, 6))
     fig.patch.set_facecolor("white")
     gs = fig.add_gridspec(
         3,
         2,
-        width_ratios=[5, 1.2],
+        width_ratios=[5, 1.4],
         height_ratios=[3, 1, 1],
         hspace=0.05,
         wspace=0.05,
@@ -329,37 +340,51 @@ def show_candlestick():
     ax_price = fig.add_subplot(gs[0, 0])
     ax_volume = fig.add_subplot(gs[1, 0], sharex=ax_price)
     ax_rsi = fig.add_subplot(gs[2, 0], sharex=ax_price)
-    ax_vp = fig.add_subplot(gs[0, 1], sharey=ax_price)
+    ax_vp = fig.add_subplot(gs[:, 1], sharey=ax_price)
 
-    fig.add_subplot(gs[1, 1]).axis("off")
-    fig.add_subplot(gs[2, 1]).axis("off")
+    candlestick_ohlc(
+        ax_price,
+        ohlc,
+        width=candle_width,
+        colorup='green',
+        colordown='red',
+        alpha=1.0,
+    )
 
-    for t, o, h, l, c in ohlc:
-        color = 'green' if c >= o else 'red'
-        ax_price.plot([t, t], [l, h], color='black', linewidth=1)
-        body_height = abs(c - o) if abs(c - o) > 0 else 1e-9
-        ax_price.add_patch(
-            plt.Rectangle(
-                (t - candle_width / 2, min(o, c)),
-                candle_width,
-                body_height,
-                color=color,
-                linewidth=0,
-            )
+    if not volume_by_price.empty:
+        ax_vp.barh(
+            volume_by_price.index,
+            volume_by_price.values,
+            height=bin_size * 0.9,
+            color='lightgray',
+            edgecolor='dimgray',
         )
-
-    ax_vp.barh(volume_by_price.index, norm_vol, height=bin_size * 0.9, color='gray')
-    vp_extent = float(norm_vol.max()) if not norm_vol.empty else 0.0
-    ax_vp.set_xlim(0, max(vp_extent * 1.05, 1))
-    ax_vp.set_xticks([])
+    vp_max = volume_by_price.max() if not volume_by_price.empty else 0
+    if vp_max:
+        ax_vp.set_xlim(vp_max * 1.1, 0)
+    else:
+        ax_vp.set_xlim(1, 0)
     ax_vp.set_xlabel('Volume')
-    ax_vp.spines['left'].set_visible(False)
+    ax_vp.xaxis.set_label_position('top')
+    ax_vp.xaxis.set_major_formatter(mticker.EngFormatter(unit=''))
+    ax_vp.tick_params(axis='x', labelbottom=False, bottom=False, labeltop=True, top=True)
     ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
+    ax_vp.spines['left'].set_visible(False)
+    ax_vp.spines['top'].set_visible(False)
+    ax_vp.spines['bottom'].set_visible(False)
+    ax_vp.margins(y=0)
 
     volume_colors = ['green' if c >= o else 'red' for o, c in zip(plot_df['Open'], plot_df['Close'])]
-    ax_volume.bar(plot_df['Date'], plot_df['Volume'], width=volume_width, color=volume_colors, align='center')
+    ax_volume.bar(
+        plot_df['Date'],
+        plot_df['Volume'],
+        width=candle_width,
+        color=volume_colors,
+        align='center',
+    )
     ax_volume.set_ylabel('Volume')
     ax_volume.yaxis.set_label_position('right')
+    ax_volume.margins(x=0)
 
     delta = plot_df['Close'].diff()
     gains = delta.clip(lower=0)
@@ -381,6 +406,9 @@ def show_candlestick():
     ax_rsi.yaxis.set_label_position('right')
     ax_rsi.set_yticks([0, 30, 50, 70, 100])
 
+    ax_price.xaxis_date()
+    ax_volume.xaxis_date()
+    ax_rsi.xaxis_date()
     ax_price.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     ax_price.xaxis.set_major_locator(mticker.MaxNLocator(10))
     fig.autofmt_xdate(rotation=45)
@@ -391,9 +419,11 @@ def show_candlestick():
     ax_volume.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
     ax_rsi.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
     ax_rsi.set_xlabel('Date')
+    ax_rsi.margins(x=0)
     ax_price.set_xlim(plot_df['Date'].min() - min_spacing, plot_df['Date'].max() + min_spacing)
     ax_volume.set_xlim(ax_price.get_xlim())
     ax_rsi.set_xlim(ax_price.get_xlim())
+    ax_vp.set_ylim(ax_price.get_ylim())
 
     long_name = _long_name_cache.get(sym)
     if long_name is None:
