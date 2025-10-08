@@ -320,17 +320,24 @@ def show_candlestick():
     bin_start = np.floor(price_min / bin_size) * bin_size
     bin_end = np.ceil(price_max / bin_size) * bin_size
     bins = np.arange(bin_start, bin_end + bin_size, bin_size)
+    if bin_size > 0:
+        precision = max(0, int(np.ceil(-np.log10(bin_size))) + 2)
+        precision = min(10, precision)
+    else:
+        precision = 6
+    bins = np.round(bins, decimals=precision)
     if bins[-1] < bin_end:
         bins = np.append(bins, bin_end)
     if bins.size < 2:
         bins = np.array([bin_start, bin_start + bin_size])
 
     price_levels = 0.5 * (bins[1:] + bins[:-1])
+    price_index = pd.Index(price_levels, name='Price')
     # Build a price-volume profile that aligns each candle's volume with the
     # actual price range traded during that candle.  Distributing volume across
     # the high/low range ties the histogram bars to the price axis instead of
     # assigning all of the volume to the closing price.
-    volume_by_price = pd.Series(0.0, index=price_levels)
+    volume_by_price = pd.Series(0.0, index=price_index)
 
     bin_low_edges = bins[:-1]
     bin_high_edges = bins[1:]
