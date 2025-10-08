@@ -359,7 +359,9 @@ def show_candlestick():
     ax_price = fig.add_subplot(gs[0, 0])
     ax_volume = fig.add_subplot(gs[1, 0], sharex=ax_price)
     ax_rsi = fig.add_subplot(gs[2, 0], sharex=ax_price)
-    ax_vp = fig.add_subplot(gs[:, 1], sharey=ax_price)
+    ax_vp = fig.add_subplot(gs[0, 1], sharey=ax_price)
+    for row in (1, 2):
+        fig.add_subplot(gs[row, 1]).axis('off')
 
     for t, o, h, l, c in ohlc:
         color = 'green' if c >= o else 'red'
