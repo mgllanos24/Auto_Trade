@@ -291,10 +291,40 @@ def show_candlestick():
     plot_df['Date'] = mdates.date2num(plot_df.index.to_pydatetime())
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
-    bin_size = 1.0
     price_min = plot_df['Low'].min()
     price_max = plot_df['High'].max()
-    bins = np.arange(price_min, price_max + bin_size, bin_size)
+    price_range = price_max - price_min
+
+    if price_range == 0:
+        price_range = max(price_max * 0.01, 0.5)
+
+    target_bins = 60
+
+    price_points = plot_df[['Open', 'High', 'Low', 'Close']].to_numpy().ravel()
+    price_points = price_points[~np.isnan(price_points)]
+    if price_points.size > 1:
+        unique_prices = np.unique(price_points)
+        price_steps = np.diff(unique_prices)
+        price_steps = price_steps[price_steps > 0]
+        native_step = price_steps.min() if price_steps.size else 0
+    else:
+        native_step = 0
+
+    if native_step > 0:
+        raw_bin_size = price_range / target_bins if price_range else native_step
+        multiples = max(1, np.ceil(raw_bin_size / native_step))
+        bin_size = multiples * native_step
+    else:
+        bin_size = max(price_range / target_bins, 0.01)
+
+    bin_start = np.floor(price_min / bin_size) * bin_size
+    bin_end = np.ceil(price_max / bin_size) * bin_size
+    bins = np.arange(bin_start, bin_end + bin_size, bin_size)
+    if bins[-1] < bin_end:
+        bins = np.append(bins, bin_end)
+    if bins.size < 2:
+        bins = np.array([bin_start, bin_start + bin_size])
+
     price_levels = 0.5 * (bins[1:] + bins[:-1])
     # Build a price-volume profile that aligns each candle's volume with the
     # actual price range traded during that candle.  Distributing volume across
@@ -356,7 +386,10 @@ def show_candlestick():
         ax_price.plot([t, t], [l, h], color='black')
         ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
 
-    ax_vp.barh(volume_by_price.index, norm_vol, height=bin_size * 0.9, color='gray')
+    bar_positions = price_levels
+    bar_heights = np.diff(bins)
+    ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='center', color='gray')
+    ax_vp.set_ylim(price_min, price_max)
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
     ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
