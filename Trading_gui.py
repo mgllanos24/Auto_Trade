@@ -310,7 +310,7 @@ def show_candlestick():
     # actual price range traded during that candle.  Distributing volume across
     # the high/low range ties the histogram bars to the price axis instead of
     # assigning all of the volume to the closing price.
-    volume_by_price = pd.Series(0.0, index=price_index)
+    volume_by_price = pd.Series(0.0, index=price_levels)
 
     bin_low_edges = bins[:-1]
     bin_high_edges = bins[1:]
