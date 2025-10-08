@@ -386,9 +386,9 @@ def show_candlestick():
         ax_price.plot([t, t], [l, h], color='black')
         ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
 
-    bar_positions = price_levels
+    bar_positions = bins[:-1]
     bar_heights = np.diff(bins)
-    ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='center', color='gray')
+    ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='edge', color='gray')
     ax_vp.set_ylim(price_min, price_max)
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
