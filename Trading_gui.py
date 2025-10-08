@@ -296,10 +296,52 @@ def show_candlestick():
     price_max = plot_df['High'].max()
     bins = np.arange(price_min, price_max + bin_size, bin_size)
     price_levels = 0.5 * (bins[1:] + bins[:-1])
-    plot_df['price_bin'] = np.digitize(plot_df['Close'], bins)
-    volume_by_price = plot_df.groupby('price_bin')['Volume'].sum()
-    volume_by_price.index = price_levels[volume_by_price.index - 1]
-    norm_vol = volume_by_price / volume_by_price.max()
+    # Build a price-volume profile that aligns each candle's volume with the
+    # actual price range traded during that candle.  Distributing volume across
+    # the high/low range ties the histogram bars to the price axis instead of
+    # assigning all of the volume to the closing price.
+    volume_by_price = pd.Series(0.0, index=price_levels)
+
+    bin_low_edges = bins[:-1]
+    bin_high_edges = bins[1:]
+
+    for _, row in plot_df.iterrows():
+        low = row['Low']
+        high = row['High']
+        volume = row['Volume']
+
+        if pd.isna(low) or pd.isna(high) or pd.isna(volume):
+            continue
+
+        if high == low:
+            bin_idx = np.searchsorted(bins, high, side='right') - 1
+            bin_idx = min(max(bin_idx, 0), len(price_levels) - 1)
+            volume_by_price.iloc[bin_idx] += volume
+            continue
+
+        start_idx = np.searchsorted(bins, low, side='right') - 1
+        end_idx = np.searchsorted(bins, high, side='right') - 1
+
+        start_idx = max(start_idx, 0)
+        end_idx = min(end_idx, len(price_levels) - 1)
+
+        if end_idx < start_idx:
+            continue
+
+        relevant_lows = bin_low_edges[start_idx:end_idx + 1]
+        relevant_highs = bin_high_edges[start_idx:end_idx + 1]
+
+        overlaps = np.minimum(high, relevant_highs) - np.maximum(low, relevant_lows)
+        overlaps = np.clip(overlaps, 0, None)
+        total_overlap = overlaps.sum()
+
+        if total_overlap <= 0:
+            continue
+
+        volume_distribution = volume * (overlaps / total_overlap)
+        volume_by_price.iloc[start_idx:end_idx + 1] += volume_distribution
+    norm_denominator = volume_by_price.max()
+    norm_vol = volume_by_price / norm_denominator if norm_denominator else volume_by_price
 
     fig = plt.figure(figsize=(12, 6))
     gs = fig.add_gridspec(3, 2, width_ratios=[20, 5], height_ratios=[3, 1, 1], hspace=0.05, wspace=0.05)
