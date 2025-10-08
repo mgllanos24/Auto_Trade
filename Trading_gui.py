@@ -299,40 +299,13 @@ def show_candlestick():
         price_range = max(price_max * 0.01, 0.5)
 
     target_bins = 60
+    bin_size = max(price_range / target_bins, 0.01)
 
-    price_points = plot_df[['Open', 'High', 'Low', 'Close']].to_numpy().ravel()
-    price_points = price_points[~np.isnan(price_points)]
-    if price_points.size > 1:
-        unique_prices = np.unique(price_points)
-        price_steps = np.diff(unique_prices)
-        price_steps = price_steps[price_steps > 0]
-        native_step = price_steps.min() if price_steps.size else 0
-    else:
-        native_step = 0
-
-    if native_step > 0:
-        raw_bin_size = price_range / target_bins if price_range else native_step
-        multiples = max(1, np.ceil(raw_bin_size / native_step))
-        bin_size = multiples * native_step
-    else:
-        bin_size = max(price_range / target_bins, 0.01)
-
-    bin_start = np.floor(price_min / bin_size) * bin_size
-    bin_end = np.ceil(price_max / bin_size) * bin_size
-    bins = np.arange(bin_start, bin_end + bin_size, bin_size)
-    if bin_size > 0:
-        precision = max(0, int(np.ceil(-np.log10(bin_size))) + 2)
-        precision = min(10, precision)
-    else:
-        precision = 6
-    bins = np.round(bins, decimals=precision)
-    if bins[-1] < bin_end:
-        bins = np.append(bins, bin_end)
-    if bins.size < 2:
-        bins = np.array([bin_start, bin_start + bin_size])
+    bins = np.arange(price_min, price_max + bin_size, bin_size)
+    if bins[-1] < price_max:
+        bins = np.append(bins, price_max)
 
     price_levels = 0.5 * (bins[1:] + bins[:-1])
-    price_index = pd.Index(price_levels, name='Price')
     # Build a price-volume profile that aligns each candle's volume with the
     # actual price range traded during that candle.  Distributing volume across
     # the high/low range ties the histogram bars to the price axis instead of
