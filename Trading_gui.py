@@ -291,10 +291,20 @@ def show_candlestick():
     plot_df['Date'] = mdates.date2num(plot_df.index.to_pydatetime())
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
-    bin_size = 1.0
     price_min = plot_df['Low'].min()
     price_max = plot_df['High'].max()
+    price_range = price_max - price_min
+
+    if price_range == 0:
+        price_range = max(price_max * 0.01, 0.5)
+
+    target_bins = 60
+    bin_size = max(price_range / target_bins, 0.01)
+
     bins = np.arange(price_min, price_max + bin_size, bin_size)
+    if bins[-1] < price_max:
+        bins = np.append(bins, price_max)
+
     price_levels = 0.5 * (bins[1:] + bins[:-1])
     # Build a price-volume profile that aligns each candle's volume with the
     # actual price range traded during that candle.  Distributing volume across
@@ -356,7 +366,10 @@ def show_candlestick():
         ax_price.plot([t, t], [l, h], color='black')
         ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
 
-    ax_vp.barh(volume_by_price.index, norm_vol, height=bin_size * 0.9, color='gray')
+    bar_positions = bins[:-1]
+    bar_heights = np.diff(bins)
+    ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='edge', color='gray')
+    ax_vp.set_ylim(price_min, price_max)
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
     ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
