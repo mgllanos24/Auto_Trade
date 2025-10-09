@@ -34,19 +34,6 @@ from trading_bot import SwingTradingBot, TradePlan
 
 
 # ---------------------------------------------------------------------------
-# User-provided Alpaca credentials
-# ---------------------------------------------------------------------------
-
-API_KEY = "PKWMYLAWJCU6ITACV6KP"
-API_SECRET = "k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07"
-
-# Ensure the environment variables are populated so existing helper utilities
-# continue to work without requiring external configuration changes.
-os.environ.setdefault("ALPACA_API_KEY", API_KEY)
-os.environ.setdefault("ALPACA_API_SECRET", API_SECRET)
-
-
-# ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
