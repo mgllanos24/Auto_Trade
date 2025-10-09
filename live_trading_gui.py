@@ -34,6 +34,18 @@ from tkinter import scrolledtext, ttk, messagebox
 from trading_bot import SwingTradingBot, TradePlan
 
 
+@dataclass
+class TradeTransaction:
+    """Simple container describing a manual trade entry."""
+
+    timestamp: pd.Timestamp
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    notes: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
@@ -243,6 +255,10 @@ class TradingBotApp:
 
         self._output_queue: "queue.Queue[str]" = queue.Queue()
         self._worker: Optional[TradingBotWorker] = None
+        self._transaction_window: Optional[tk.Toplevel] = None
+        self._transactions: list[TradeTransaction] = []
+        self._transaction_entries: dict[str, tk.Variable] = {}
+        self._transactions_tree: Optional[ttk.Treeview] = None
 
         self._build_widgets()
         self._poll_output_queue()
@@ -277,6 +293,9 @@ class TradingBotApp:
         self.start_button.pack(side=tk.LEFT, padx=5)
         self.stop_button = ttk.Button(button_frame, text="Stop", command=self.stop_bot, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Transactions", command=self._open_transaction_window).pack(
+            side=tk.LEFT, padx=5
+        )
 
         status_frame = ttk.Frame(self.root)
         status_frame.pack(fill=tk.X, padx=10)
@@ -351,6 +370,156 @@ class TradingBotApp:
             pass
         finally:
             self.root.after(500, self._poll_output_queue)
+
+    # ------------------------------------------------------------------
+    # Trade transaction window
+    # ------------------------------------------------------------------
+    def _open_transaction_window(self) -> None:
+        if self._transaction_window is not None and tk.Toplevel.winfo_exists(self._transaction_window):
+            self._transaction_window.deiconify()
+            self._transaction_window.lift()
+            return
+
+        self._transaction_window = tk.Toplevel(self.root)
+        self._transaction_window.title("Trade Transactions")
+        self._transaction_window.geometry("640x360")
+        self._transaction_window.protocol("WM_DELETE_WINDOW", self._close_transaction_window)
+        self._build_transaction_window(self._transaction_window)
+
+    def _close_transaction_window(self) -> None:
+        if self._transaction_window is None:
+            return
+        self._transaction_window.destroy()
+        self._transaction_window = None
+        self._transaction_entries.clear()
+        self._transactions_tree = None
+
+    def _build_transaction_window(self, window: tk.Toplevel) -> None:
+        form_frame = ttk.LabelFrame(window, text="New Transaction")
+        form_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        fields: list[tuple[str, tk.Variable, Optional[Sequence[str]]]] = [
+            ("Symbol", tk.StringVar(), None),
+            ("Side", tk.StringVar(value="Buy"), ("Buy", "Sell")),
+            ("Quantity", tk.StringVar(), None),
+            ("Price", tk.StringVar(), None),
+            ("Notes", tk.StringVar(), None),
+        ]
+
+        for row, (label, variable, choices) in enumerate(fields):
+            ttk.Label(form_frame, text=label).grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+            if choices is None:
+                entry = ttk.Entry(form_frame, textvariable=variable)
+            else:
+                entry = ttk.Combobox(form_frame, textvariable=variable, values=choices, state="readonly")
+            entry.grid(row=row, column=1, sticky=tk.W + tk.E, padx=5, pady=5)
+            self._transaction_entries[label.lower()] = variable
+
+        add_button = ttk.Button(form_frame, text="Add Transaction", command=self._add_transaction)
+        add_button.grid(row=len(fields), column=0, columnspan=2, pady=(10, 0))
+
+        tree_frame = ttk.LabelFrame(window, text="Transaction History")
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        columns = ("timestamp", "symbol", "side", "quantity", "price", "notes")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        headings = {
+            "timestamp": "Timestamp",
+            "symbol": "Symbol",
+            "side": "Side",
+            "quantity": "Quantity",
+            "price": "Price",
+            "notes": "Notes",
+        }
+        for column, heading in headings.items():
+            tree.heading(column, text=heading)
+            if column == "notes":
+                tree.column(column, width=180)
+            else:
+                tree.column(column, width=90, anchor=tk.CENTER)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._transactions_tree = tree
+        self._refresh_transactions_view()
+
+    def _add_transaction(self) -> None:
+        entries = self._transaction_entries
+        symbol = entries.get("symbol")
+        side = entries.get("side")
+        quantity = entries.get("quantity")
+        price = entries.get("price")
+        notes = entries.get("notes")
+
+        if symbol is None or side is None or quantity is None or price is None or notes is None:
+            return
+
+        symbol_value = symbol.get().strip().upper()
+        side_value = side.get().strip().capitalize()
+        quantity_value = quantity.get().strip()
+        price_value = price.get().strip()
+        notes_value = notes.get().strip()
+
+        if not symbol_value:
+            messagebox.showerror("Trade Transactions", "Symbol is required.")
+            return
+
+        try:
+            quantity_float = float(quantity_value)
+            price_float = float(price_value)
+        except ValueError:
+            messagebox.showerror(
+                "Trade Transactions",
+                "Quantity and Price must be numeric values.",
+            )
+            return
+
+        transaction = TradeTransaction(
+            timestamp=pd.Timestamp.utcnow(),
+            symbol=symbol_value,
+            side=side_value,
+            quantity=quantity_float,
+            price=price_float,
+            notes=notes_value,
+        )
+        self._transactions.append(transaction)
+        self._refresh_transactions_view()
+
+        for variable in (symbol, side, quantity, price, notes):
+            if variable is side:
+                variable.set("Buy")
+            else:
+                variable.set("")
+
+        self._append_log(
+            "Recorded transaction: "
+            f"{transaction.symbol} {transaction.side} {transaction.quantity} @ {transaction.price}"
+        )
+
+    def _refresh_transactions_view(self) -> None:
+        tree = self._transactions_tree
+        if tree is None:
+            return
+
+        for item in tree.get_children():
+            tree.delete(item)
+
+        for tx in self._transactions:
+            tree.insert(
+                "",
+                tk.END,
+                values=(
+                    tx.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    tx.symbol,
+                    tx.side,
+                    f"{tx.quantity:g}",
+                    f"{tx.price:.2f}",
+                    tx.notes,
+                ),
+            )
 
 
 def main() -> None:  # pragma: no cover - thin wrapper
