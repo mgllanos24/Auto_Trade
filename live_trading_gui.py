@@ -19,6 +19,7 @@ place orders automatically instead of just logging recommendations).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import queue
 import threading
 import time
@@ -45,11 +46,49 @@ class AlpacaCredentialsError(RuntimeError):
     """Raised when Alpaca credentials are missing."""
 
 
+def _load_env_file(path: str = ".env") -> None:
+    """Populate :mod:`os.environ` from a simple ``.env`` file.
+
+    The desktop application is often run outside of a managed shell where
+    environment variables are inconvenient to define.  This helper mirrors the
+    behaviour of popular ``dotenv`` packages without introducing an additional
+    dependency.  Each non-empty, non-comment line must follow ``KEY=VALUE``
+    syntax.  Existing environment variables always take precedence over values
+    defined in the file.
+    """
+
+    env_path = Path(path)
+    if getattr(_load_env_file, "_loaded", False):  # pragma: no cover - guard rail
+        return
+
+    setattr(_load_env_file, "_loaded", True)
+
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
 def _read_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise AlpacaCredentialsError(
-            "Missing required environment variable: %s" % name
+            (
+                "Missing required environment variable: {name}.\n\n"
+                "Set it before launching the app or add it to a .env file in the "
+                "project directory with entries such as:\n"
+                "ALPACA_API_KEY=your_key_here\n"
+                "ALPACA_API_SECRET=your_secret_here"
+            ).format(name=name)
         )
     return value
 
@@ -109,6 +148,7 @@ class AlpacaClient:
 def build_alpaca_client_from_env() -> AlpacaClient:
     """Load API credentials from environment variables."""
 
+    _load_env_file()
     api_key = _read_env("ALPACA_API_KEY")
     api_secret = _read_env("ALPACA_API_SECRET")
     data_url = os.getenv("ALPACA_DATA_URL", DEFAULT_DATA_URL)

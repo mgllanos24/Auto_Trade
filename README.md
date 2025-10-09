@@ -26,6 +26,22 @@ your minimum reward-to-risk threshold.
    The trading bot itself only relies on `pandas`, but the test suite
    also uses `numpy`.
 
+## Configuring Alpaca credentials
+
+The optional desktop GUI in [`live_trading_gui.py`](live_trading_gui.py) reads
+your Alpaca API credentials from environment variables.  For convenience it
+also loads a local `.env` file from the project root if present.  Create the
+file with the following contents (replace the placeholders with your own
+credentials):
+
+```text
+ALPACA_API_KEY=your_api_key
+ALPACA_API_SECRET=your_api_secret
+```
+
+When the GUI launches it will populate the environment from this file, so you
+do not need to export the variables manually.
+
 ## Getting market data
 
 The bot operates on historical OHLCV data supplied as a `pandas`
