@@ -29,29 +29,62 @@ def _install_stub_modules() -> None:
 
     if "numpy" not in sys.modules:
         numpy_stub = types.ModuleType("numpy")
-        numpy_stub.ndarray = object
+
+        class _Array(list):
+            @property
+            def size(self):
+                return len(self)
+
+            def max(self):
+                return max(self) if self else 0
+
+            def min(self):
+                return min(self) if self else 0
+
+            def mean(self):
+                return sum(self) / len(self) if self else 0
+
+            def reshape(self, _rows, cols):
+                if cols != 1:
+                    raise NotImplementedError("Stub reshape only supports single column")
+                return [[value] for value in self]
+
+            def __getitem__(self, item):
+                if isinstance(item, slice):
+                    return _Array(list(super().__getitem__(item)))
+                if isinstance(item, list):
+                    return _Array([self[i] for i in item])
+                return super().__getitem__(item)
+
+        def _array(values, dtype=None):
+            return _Array(values)
 
         def _arange(start, stop=None, step=1, **kwargs):
             if stop is None:
                 stop = start
                 start = 0
-            values = []
+            result = _Array([])
             current = start
             while current < stop:
-                values.append(current)
+                result.append(current)
                 current += step
-            return values
+            return result
 
         def _linspace(start, stop, num, **kwargs):
             if num <= 1:
-                return [start]
+                return _Array([start])
             step = (stop - start) / (num - 1)
-            return [start + step * i for i in range(num)]
+            return _Array([start + step * i for i in range(num)])
 
+        def _diff(values):
+            return _Array([values[i + 1] - values[i] for i in range(len(values) - 1)])
+
+        numpy_stub.array = _array
+        numpy_stub.asarray = _array
         numpy_stub.arange = _arange
         numpy_stub.linspace = _linspace
-        numpy_stub.less = lambda a, b: a < b
-        numpy_stub.greater = lambda a, b: a > b
+        numpy_stub.diff = _diff
+        numpy_stub.any = lambda iterable: any(iterable)
         numpy_stub.abs = abs
         numpy_stub.sum = sum
         numpy_stub.isnan = lambda *args, **kwargs: False
@@ -72,8 +105,27 @@ def _install_stub_modules() -> None:
     if "sklearn.linear_model" not in sys.modules:
         class DummyLinearRegression:
             def fit(self, X, y):
-                self.coef_ = [0]
+                xs = [row[0] for row in X]
+                ys = list(y)
+                if not xs:
+                    self.coef_ = [0.0]
+                    self.intercept_ = 0.0
+                    return self
+                n = len(xs)
+                mean_x = sum(xs) / n
+                mean_y = sum(ys) / n
+                denom = sum((x - mean_x) ** 2 for x in xs)
+                if denom == 0:
+                    slope = 0.0
+                else:
+                    slope = sum((x - mean_x) * (y_val - mean_y) for x, y_val in zip(xs, ys)) / denom
+                self.coef_ = [slope]
+                self.intercept_ = mean_y - slope * mean_x
                 return self
+
+            def predict(self, X):
+                slope = self.coef_[0]
+                return [self.intercept_ + slope * row[0] for row in X]
 
         linear_model_stub = types.ModuleType("sklearn.linear_model")
         linear_model_stub.LinearRegression = DummyLinearRegression
@@ -90,7 +142,7 @@ def _install_stub_modules() -> None:
 
 _install_stub_modules()
 
-from pattern_scanner import detect_double_bottom
+from pattern_scanner import detect_double_bottom, detect_ascending_triangle
 
 
 class DummyDataFrame:
@@ -161,3 +213,62 @@ def test_detect_double_bottom_prefers_recent_hit(monkeypatch):
     result = detect_double_bottom(df, window=60)
 
     assert result is recent_hit
+
+
+class _Series:
+    def __init__(self, values):
+        numpy_mod = sys.modules.get("numpy")
+        if numpy_mod and hasattr(numpy_mod, "array"):
+            self.values = numpy_mod.array(values)
+        else:
+            self.values = list(values)
+
+
+class _Frame:
+    def __init__(self, data):
+        self._data = {key: list(value) for key, value in data.items()}
+        self._length = len(next(iter(self._data.values()))) if self._data else 0
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, item):
+        return _Series(self._data[item])
+
+    def tail(self, window):
+        window = min(window, self._length)
+        sliced = {key: value[-window:] for key, value in self._data.items()}
+        return _Frame(sliced)
+
+
+def _build_price_frame(highs, lows, closes):
+    return _Frame(
+        {
+            "high": highs,
+            "low": lows,
+            "close": closes,
+        }
+    )
+
+
+def test_detect_ascending_triangle_prefers_flat_resistance():
+    highs = [10.0, 10.02, 10.01, 9.99, 10.03, 10.02, 10.04, 10.05, 10.6]
+    lows = [9.5, 9.55, 9.6, 9.65, 9.7, 9.8, 9.9, 10.0, 10.45]
+    closes = [9.8, 9.9, 10.0, 10.1, 10.2, 10.3, 10.35, 10.4, 10.55]
+    df = _build_price_frame(highs, lows, closes)
+
+    pattern = detect_ascending_triangle(df, window=9, tolerance=0.02, min_touches=2)
+
+    assert pattern is not None
+    assert pattern.breakout is True
+
+
+def test_detect_ascending_triangle_rejects_wide_plateau():
+    highs = [10.0, 10.1, 10.25, 10.4, 10.2, 10.5, 10.7, 10.9, 11.0]
+    lows = [9.5, 9.55, 9.6, 9.65, 9.7, 9.8, 9.9, 10.0, 10.1]
+    closes = [9.8, 9.85, 9.95, 10.05, 10.15, 10.25, 10.35, 10.45, 10.55]
+    df = _build_price_frame(highs, lows, closes)
+
+    pattern = detect_ascending_triangle(df, window=9, tolerance=0.02, min_touches=2)
+
+    assert pattern is None
