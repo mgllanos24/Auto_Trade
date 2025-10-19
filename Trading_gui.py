@@ -25,7 +25,7 @@ import time
 import threading
 import signal
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -118,6 +118,35 @@ def _normalise_report_date(raw: Any) -> str:
     return str(raw)
 
 
+def _parse_report_datetime(raw: Any) -> Optional[datetime]:
+    if raw in (None, "", "N/A"):
+        return None
+
+    if isinstance(raw, (int, float)):
+        for divisor in (1, 1000):
+            try:
+                parsed = datetime.fromtimestamp(raw / divisor)
+            except (OverflowError, OSError, ValueError):
+                continue
+            else:
+                if parsed.year >= 1970:
+                    return parsed
+        return None
+
+    try:
+        parsed = pd.to_datetime(raw, errors="coerce")
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    if pd.isna(parsed):
+        return None
+
+    if hasattr(parsed, "to_pydatetime"):
+        return parsed.to_pydatetime()
+
+    return None
+
+
 def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str]]:
     now = time.time()
     cached = _institution_activity_cache.get(symbol)
@@ -153,6 +182,7 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
         purchased = entry.get("purchased")
         sold = entry.get("soldOut")
         organization = entry.get("organization") or "Unknown"
+        report_datetime = _parse_report_datetime(entry.get("reportDate"))
         parsed_entries.append(
             {
                 "organization": organization,
@@ -160,12 +190,18 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
                 "purchased": purchased if purchased is not None else 0,
                 "sold": sold if sold is not None else 0,
                 "report_date": _normalise_report_date(entry.get("reportDate")),
+                "report_datetime": report_datetime,
             }
         )
 
     parsed_entries.sort(key=lambda item: abs(item.get("net_activity", 0)), reverse=True)
-    _institution_activity_cache[symbol] = (now, parsed_entries)
-    return parsed_entries, None
+    cutoff = datetime.utcnow() - timedelta(days=182)
+    recent_entries = [
+        entry for entry in parsed_entries if entry.get("report_datetime") and entry["report_datetime"] >= cutoff
+    ]
+
+    _institution_activity_cache[symbol] = (now, recent_entries)
+    return recent_entries, None
 
 
 def _detect_with_trimming(
@@ -472,7 +508,7 @@ def show_candlestick():
     elif not activity_entries:
         tk.Label(
             info_panel,
-            text="No recent institutional accumulation or selling reported.",
+            text="No institutional accumulation or selling reported in the past 6 months.",
             justify="left",
             wraplength=240,
             bg="#f5f5f5",
@@ -483,64 +519,81 @@ def show_candlestick():
         net_color = "green" if total_net > 0 else "red" if total_net < 0 else "#555555"
         tk.Label(
             info_panel,
-            text=f"Net activity: {_format_share_amount(total_net)} shares",
+            text=f"Net activity (6M): {_format_share_amount(total_net)} shares",
             fg=net_color,
             bg="#f5f5f5",
             anchor="w",
         ).pack(fill="x", padx=4, pady=(6, 2))
 
-        for entry in activity_entries[:6]:
-            frame = tk.Frame(info_panel, bg="#f5f5f5")
-            frame.pack(fill="x", padx=2, pady=(4, 0))
+        top_accumulators = sorted(
+            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) > 0),
+            key=lambda entry: entry.get("net_activity", 0) or 0,
+            reverse=True,
+        )[:3]
+        top_sellers = sorted(
+            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) < 0),
+            key=lambda entry: entry.get("net_activity", 0) or 0,
+        )[:3]
 
+        if not top_accumulators and not top_sellers:
             tk.Label(
-                frame,
-                text=entry.get("organization", "Unknown"),
-                font=("Arial", 10, "bold"),
-                bg="#f5f5f5",
-                anchor="w",
+                info_panel,
+                text="No institutional accumulation or selling in the past 6 months.",
                 justify="left",
                 wraplength=240,
-            ).pack(fill="x")
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=6)
 
-            net_value = entry.get("net_activity", 0) or 0
-            if net_value > 0:
-                action_text = "Accumulated"
-                action_color = "green"
-                net_display = _format_share_amount(net_value)
-            elif net_value < 0:
-                action_text = "Sold"
-                action_color = "red"
+        def _render_section(title: str, entries: list[dict[str, Any]], positive: bool) -> None:
+            if not entries:
+                return
+
+            tk.Label(
+                info_panel,
+                text=title,
+                font=("Arial", 11, "bold"),
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=(8, 2))
+
+            for entry in entries:
+                frame = tk.Frame(info_panel, bg="#f5f5f5")
+                frame.pack(fill="x", padx=2, pady=(4, 0))
+
+                tk.Label(
+                    frame,
+                    text=entry.get("organization", "Unknown"),
+                    font=("Arial", 10, "bold"),
+                    bg="#f5f5f5",
+                    anchor="w",
+                    justify="left",
+                    wraplength=240,
+                ).pack(fill="x")
+
+                net_value = entry.get("net_activity", 0) or 0
+                action_color = "green" if positive else "red"
                 net_display = _format_share_amount(abs(net_value))
-            else:
-                action_text = "No net change"
-                action_color = "#555555"
-                net_display = "0"
+                action_text = "Accumulated" if positive else "Sold"
 
-            tk.Label(
-                frame,
-                text=f"{action_text}: {net_display} shares",
-                fg=action_color,
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+                tk.Label(
+                    frame,
+                    text=f"{action_text}: {net_display} shares",
+                    fg=action_color,
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
 
-            purchased = entry.get("purchased", 0) or 0
-            sold = entry.get("sold", 0) or 0
-            tk.Label(
-                frame,
-                text=f"Bought: {_format_share_amount(purchased)} | Sold: {_format_share_amount(sold)}",
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+                tk.Label(
+                    frame,
+                    text=f"Report: {entry.get('report_date', 'N/A')}",
+                    fg="#666666",
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
 
-            tk.Label(
-                frame,
-                text=f"Report: {entry.get('report_date', 'N/A')}",
-                fg="#666666",
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+        _render_section("Top accumulators (6M)", top_accumulators, True)
+        _render_section("Top sellers (6M)", top_sellers, False)
 
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
