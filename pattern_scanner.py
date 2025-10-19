@@ -181,19 +181,73 @@ def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
 
 def get_yf_data(symbol):
     try:
-        df = yf.download(symbol, period='1y', interval='1d', progress=False, auto_adjust=False)
-        df = flatten_yf_columns(df)
-        if df.empty or len(df) < 90:
-            print(f" Insufficient data for {symbol}: only {len(df)} rows")
-            return pd.DataFrame()
-        df.reset_index(inplace=True)
-        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-        if df[['high', 'low', 'close', 'volume']].isnull().any().any():
-            return pd.DataFrame()
-        df.set_index('Date', inplace=True)
-        return df[['open', 'high', 'low', 'close', 'volume']]
-    except Exception:
+        raw = yf.download(
+            symbol,
+            period='1y',
+            interval='1d',
+            progress=False,
+            auto_adjust=False,
+        )
+    except Exception as exc:
+        print(f" Error downloading {symbol}: {exc}")
         return pd.DataFrame()
+
+    if raw is None or raw.empty:
+        print(f" No data returned for {symbol}")
+        return pd.DataFrame()
+
+    df = flatten_yf_columns(raw)
+
+    if df.empty or len(df) < 90:
+        print(f" Insufficient data for {symbol}: only {len(df)} rows")
+        return pd.DataFrame()
+
+    df = df.reset_index()
+
+    date_column = None
+    for candidate in ('Date', 'date', 'Datetime', 'datetime', df.columns[0]):
+        if candidate in df.columns:
+            date_column = candidate
+            break
+
+    if date_column is None:
+        print(f" Missing date column for {symbol}")
+        return pd.DataFrame()
+
+    df.rename(
+        columns={
+            date_column: 'Date',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume',
+        },
+        inplace=True,
+    )
+
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', utc=True)
+    df = df.dropna(subset=['Date'])
+
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    missing_columns = [column for column in numeric_cols if column not in df.columns]
+    if missing_columns:
+        print(f" Missing columns for {symbol}: {missing_columns}")
+        return pd.DataFrame()
+
+    for column in numeric_cols:
+        df[column] = pd.to_numeric(df[column], errors='coerce')
+
+    df = df.dropna(subset=numeric_cols)
+
+    if df.empty:
+        print(f" Filtered out all rows for {symbol} due to NaNs")
+        return pd.DataFrame()
+
+    df.set_index('Date', inplace=True)
+    df.sort_index(inplace=True)
+
+    return df[numeric_cols]
 
 
 def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str, pd.DataFrame]:
