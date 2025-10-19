@@ -28,7 +28,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
 
@@ -96,6 +96,33 @@ def _resolve_min_size(kwargs: dict[str, Any], fallback: int = 40) -> int:
     return fallback
 
 
+def _unwrap_nested(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key in ("raw", "fmt", "longFmt", "shortFmt", "value"):
+            if key in value:
+                nested = value[key]
+                if nested not in (None, ""):
+                    return _unwrap_nested(nested)
+        return None
+    return value
+
+
+def _coerce_numeric(value: Any) -> Optional[float]:
+    raw = _unwrap_nested(value)
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        cleaned = raw.replace(",", "").strip()
+        if cleaned:
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+    return None
+
+
 def _format_share_amount(value: Optional[float]) -> str:
     if value is None:
         return "0"
@@ -108,24 +135,26 @@ def _format_share_amount(value: Optional[float]) -> str:
 
 
 def _normalise_report_date(raw: Any) -> str:
-    if not raw:
+    raw_value = _unwrap_nested(raw)
+    if raw_value in (None, ""):
         return "N/A"
-    if isinstance(raw, (int, float)):
+    if isinstance(raw_value, (int, float)):
         try:
-            return datetime.fromtimestamp(raw).strftime("%Y-%m-%d")
+            return datetime.fromtimestamp(raw_value).strftime("%Y-%m-%d")
         except (OverflowError, OSError, ValueError):
-            return str(raw)
-    return str(raw)
+            return str(raw_value)
+    return str(raw_value)
 
 
 def _parse_report_datetime(raw: Any) -> Optional[datetime]:
-    if raw in (None, "", "N/A"):
+    raw_value = _unwrap_nested(raw)
+    if raw_value in (None, "", "N/A"):
         return None
 
-    if isinstance(raw, (int, float)):
+    if isinstance(raw_value, (int, float)):
         for divisor in (1, 1000):
             try:
-                parsed = datetime.fromtimestamp(raw / divisor)
+                parsed = datetime.fromtimestamp(raw_value / divisor)
             except (OverflowError, OSError, ValueError):
                 continue
             else:
@@ -134,7 +163,7 @@ def _parse_report_datetime(raw: Any) -> Optional[datetime]:
         return None
 
     try:
-        parsed = pd.to_datetime(raw, errors="coerce")
+        parsed = pd.to_datetime(raw_value, errors="coerce")
     except Exception:  # pragma: no cover - defensive
         return None
 
@@ -197,8 +226,18 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
         except (OverflowError, OSError, ValueError):
             return "previously"
 
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+
     try:
-        with urlopen(url, timeout=10) as response:
+        with urlopen(request, timeout=10) as response:
             payload = json.load(response)
     except URLError as exc:
         reason = getattr(exc, "reason", exc)
@@ -231,29 +270,34 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
     for entry in raw_entries:
         if not isinstance(entry, dict):
             continue
-        net_activity = entry.get("netActivity")
-        purchased = entry.get("purchased")
-        sold = entry.get("soldOut")
+        net_activity = _coerce_numeric(entry.get("netActivity")) or 0.0
+        purchased = _coerce_numeric(entry.get("purchased")) or 0.0
+        sold = _coerce_numeric(entry.get("soldOut")) or 0.0
         organization = entry.get("organization") or "Unknown"
         report_datetime = _parse_report_datetime(entry.get("reportDate"))
         parsed_entries.append(
             {
                 "organization": organization,
-                "net_activity": net_activity if net_activity is not None else 0,
-                "purchased": purchased if purchased is not None else 0,
-                "sold": sold if sold is not None else 0,
+                "net_activity": net_activity,
+                "purchased": purchased,
+                "sold": sold,
                 "report_date": _normalise_report_date(entry.get("reportDate")),
                 "report_datetime": report_datetime,
             }
         )
 
-    parsed_entries.sort(key=lambda item: abs(item.get("net_activity", 0)), reverse=True)
+    parsed_entries.sort(key=lambda item: abs(item.get("net_activity", 0) or 0), reverse=True)
     cutoff = datetime.utcnow() - timedelta(days=182)
     recent_entries = [
         entry for entry in parsed_entries if entry.get("report_datetime") and entry["report_datetime"] >= cutoff
     ]
 
-    return _cache_and_return(recent_entries, None, "info", timestamp=now)
+    latest_report_ts = max(
+        (entry["report_datetime"].timestamp() for entry in parsed_entries if entry.get("report_datetime")),
+        default=None,
+    )
+
+    return _cache_and_return(recent_entries, None, "info", timestamp=now, data_ts=latest_report_ts)
 
 
 def _detect_with_trimming(
