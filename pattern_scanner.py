@@ -366,6 +366,10 @@ def detect_ascending_triangle(
     if resistance == 0:
         return None
 
+    plateau_range = float(plateau_highs.max() - plateau_highs.min())
+    if plateau_range / resistance > tolerance:
+        return None
+
     resistance_touches = [
         idx
         for idx in range(plateau_start, plateau_end)
@@ -390,6 +394,15 @@ def detect_ascending_triangle(
 
     if len(support_touch_indices) < min_touches:
         return None
+
+    support_touch_lows = [float(lows[idx]) for idx in support_touch_indices]
+    if len(support_touch_lows) >= 2:
+        if support_touch_lows[-1] <= support_touch_lows[0] * (1 + tolerance):
+            return None
+
+        for previous, current in zip(support_touch_lows, support_touch_lows[1:]):
+            if current < previous * (1 - tolerance):
+                return None
 
     breakout = (closes[-1] > resistance * (1 + tolerance)) or (
         highs[-1] > resistance * (1 + tolerance)
