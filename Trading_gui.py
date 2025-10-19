@@ -28,6 +28,9 @@ import json
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
 
+from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
+from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
+
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
 paper_api = tradeapi.REST(API_KEY, API_SECRET, 'https://paper-api.alpaca.markets', api_version='v2')
@@ -263,7 +266,11 @@ def show_candlestick():
     sel = tree.selection()
     if not sel:
         return
-    sym = tree.item(sel[0])["values"][0]
+    row_values = tree.item(sel[0])["values"]
+    sym = row_values[0]
+    pattern_name = ""
+    if len(row_values) > 6 and row_values[6]:
+        pattern_name = str(row_values[6])
     data_file = DATA_DIR / f"{sym}.csv"
     if sym not in symbol_data:
         if data_file.exists():
@@ -288,6 +295,7 @@ def show_candlestick():
         return
 
     plot_df.sort_index(inplace=True)
+    analysis_df = plot_df[['Open', 'High', 'Low', 'Close', 'Volume']].rename(columns=lambda c: c.lower())
     plot_df['Date'] = mdates.date2num(plot_df.index.to_pydatetime())
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
@@ -368,6 +376,76 @@ def show_candlestick():
         ax_price.plot([t, t], [l, h], color='black')
         ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
 
+    overlay_added = False
+
+    if pattern_name:
+        name_lower = pattern_name.strip().lower()
+        if name_lower == "double bottom":
+            hits = scan_double_bottoms(analysis_df, window=60)
+            if not hits:
+                hits = scan_double_bottoms(analysis_df, window=60, require_breakout=False)
+            if hits:
+                hit = max(hits, key=lambda h: h.right_idx)
+                if isinstance(hit, DoubleBottomHit):
+                    try:
+                        left_idx = hit.left_idx
+                        right_idx = hit.right_idx
+                        support = hit.support
+
+                        if 0 <= left_idx < len(plot_df) and 0 <= right_idx < len(plot_df):
+                            ax_price.axhline(support, color='#1f77b4', linestyle='--', linewidth=1.5, label='Support')
+                            overlay_added = True
+
+                            ax_price.scatter(
+                                [plot_df['Date'].iloc[left_idx], plot_df['Date'].iloc[right_idx]],
+                                [hit.left_low, hit.right_low],
+                                color='#d62728',
+                                zorder=5,
+                                label='Swing Low',
+                            )
+                            overlay_added = True
+
+                            indices = np.arange(left_idx, right_idx + 1)
+                            highs_segment = analysis_df['high'].iloc[left_idx:right_idx + 1].to_numpy()
+                            if highs_segment.size >= 2 and np.all(np.isfinite(highs_segment)):
+                                slope, intercept = np.polyfit(indices, highs_segment, 1)
+                                line_idx = np.array([left_idx, right_idx])
+                                line_prices = slope * line_idx + intercept
+                                line_dates = plot_df['Date'].iloc[[left_idx, right_idx]].to_numpy()
+                                ax_price.plot(line_dates, line_prices, color='#9467bd', linewidth=1.5, label='Neckline')
+                                overlay_added = True
+
+                                if hit.breakout_idx is not None and 0 <= hit.breakout_idx < len(plot_df):
+                                    breakout_date = plot_df['Date'].iloc[hit.breakout_idx]
+                                    breakout_price = hit.breakout_price if hit.breakout_price is not None else float(
+                                        slope * hit.breakout_idx + intercept
+                                    )
+                                    ax_price.scatter(
+                                        [breakout_date],
+                                        [breakout_price],
+                                        color='#ff7f0e',
+                                        marker='^',
+                                        s=60,
+                                        zorder=6,
+                                        label='Breakout',
+                                    )
+                                    overlay_added = True
+                    except Exception:
+                        pass
+        elif name_lower == "cup and handle":
+            hit = detect_cup_and_handle(analysis_df)
+            if isinstance(hit, CupHandleHit):
+                resistance = hit.resistance
+                ax_price.axhline(resistance, color='#9467bd', linestyle='--', linewidth=1.5, label='Resistance')
+                overlay_added = True
+
+    if overlay_added:
+        handles, labels = ax_price.get_legend_handles_labels()
+        legend_map = {label: handle for handle, label in zip(handles, labels) if label}
+        if legend_map:
+            ax_price.legend(list(legend_map.values()), list(legend_map.keys()), loc='upper left')
+
+
     bar_positions = bins[:-1]
     bar_heights = np.diff(bins)
     ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='edge', color='gray')
@@ -422,9 +500,12 @@ def show_candlestick():
         _long_name_cache[sym] = long_name
 
     title_name = long_name or sym
+    chart_title = f"{title_name} ({sym}) Candlestick with Volume Profile"
+    if pattern_name:
+        chart_title += f" — {pattern_name.strip()}"
 
     ax_price.set_ylabel('Price')
-    ax_price.set_title(f"{title_name} ({sym}) Candlestick with Volume Profile")
+    ax_price.set_title(chart_title)
     ax_price.yaxis.set_label_position('right')
     ax_price.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
 
