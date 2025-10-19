@@ -75,7 +75,7 @@ class Index(list):  # pragma: no cover - simple container
     def __getitem__(self, item):
         result = super().__getitem__(item)
         if isinstance(item, slice):
-            return Index(result, name=self.name)
+            return Index(result, name=self.name, tz=self._tz)
         return result
 
     def copy(self) -> "Index":
