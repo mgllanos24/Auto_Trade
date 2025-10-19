@@ -88,6 +88,7 @@ def _install_stub_modules() -> None:
         numpy_stub.abs = abs
         numpy_stub.sum = sum
         numpy_stub.isnan = lambda *args, **kwargs: False
+        numpy_stub.ndarray = _Array
         sys.modules["numpy"] = numpy_stub
 
     if "scipy" not in sys.modules:
