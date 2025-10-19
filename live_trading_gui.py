@@ -1,10 +1,10 @@
-"""Simple desktop GUI for running the swing trading bot with live data.
+"""Simple desktop GUI for monitoring swing trading setups with live data.
 
 The application is intentionally lightweight so it can be run on most
 machines that already have ``tkinter`` available.  It communicates with the
 Alpaca REST API using credentials supplied through environment variables and
-feeds the fetched market data into :class:`~trading_bot.SwingTradingBot` to
-generate trade plans.
+feeds the fetched market data into :class:`SwingTradePlanner` to generate
+trade plans similar to the retired ``trading_bot`` module.
 
 The GUI exposes a start/stop button that controls a background worker thread.
 That worker periodically downloads the latest bar data for the configured
@@ -31,7 +31,11 @@ import requests
 import tkinter as tk
 from tkinter import scrolledtext, ttk, messagebox
 
-from trading_bot import SwingTradingBot, TradePlan
+from swing_trading_screener import (
+    SwingCandidate,
+    SwingScreenerConfig,
+    evaluate_swing_setup,
+)
 
 
 @dataclass
@@ -44,6 +48,78 @@ class TradeTransaction:
     quantity: float
     price: float
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class TradePlan:
+    """Simplified trade plan derived directly from screener candidates."""
+
+    symbol: str
+    entry: float
+    stop: float
+    target: float
+    risk_reward: float
+    candidate: SwingCandidate
+
+
+class SwingTradePlanner:
+    """Lightweight helper that mirrors the old trading bot's calculations."""
+
+    def __init__(
+        self,
+        *,
+        screener_config: Optional[SwingScreenerConfig] = None,
+        min_rr: float = 1.2,
+        atr_stop_multiple: float = 1.0,
+        atr_target_multiple: float = 2.0,
+    ) -> None:
+        if min_rr <= 0:
+            raise ValueError("min_rr must be positive")
+        if atr_stop_multiple <= 0 or atr_target_multiple <= 0:
+            raise ValueError("ATR multiples must be positive")
+        if atr_target_multiple <= atr_stop_multiple:
+            raise ValueError("atr_target_multiple must be greater than atr_stop_multiple")
+
+        self.config = screener_config or SwingScreenerConfig()
+        self.min_rr = float(min_rr)
+        self.atr_stop_multiple = float(atr_stop_multiple)
+        self.atr_target_multiple = float(atr_target_multiple)
+
+    def generate_trade_plan(self, symbol: str, df: pd.DataFrame) -> Optional[TradePlan]:
+        """Return a trade plan when the screener emits a qualifying candidate."""
+
+        candidate = evaluate_swing_setup(symbol, df, self.config)
+        if candidate is None:
+            return None
+
+        atr_value = candidate.atr_pct * candidate.close
+        if not pd.notna(atr_value) or atr_value <= 0:
+            return None
+
+        entry = float(candidate.close)
+        stop = entry - self.atr_stop_multiple * atr_value
+        target = entry + self.atr_target_multiple * atr_value
+
+        if stop <= 0 or target <= entry:
+            return None
+
+        risk = entry - stop
+        reward = target - entry
+        if risk <= 0:
+            return None
+
+        rr_ratio = reward / risk
+        if rr_ratio < self.min_rr:
+            return None
+
+        return TradePlan(
+            symbol=symbol,
+            entry=entry,
+            stop=stop,
+            target=target,
+            risk_reward=rr_ratio,
+            candidate=candidate,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +267,7 @@ class TradingBotWorker(threading.Thread):
         self.poll_interval = poll_interval
         self.output_queue = output_queue
         self._stop_event = threading.Event()
-        self._bot = SwingTradingBot()
+        self._planner = SwingTradePlanner()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -218,7 +294,7 @@ class TradingBotWorker(threading.Thread):
                     self.output_queue.put(f"[{symbol}] No market data returned.")
                     continue
 
-                plan = self._bot.generate_trade_plan(symbol, df)
+                plan = self._planner.generate_trade_plan(symbol, df)
                 if plan is None:
                     self.output_queue.put(f"[{symbol}] No trade setup detected.")
                 else:
