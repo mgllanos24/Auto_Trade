@@ -179,10 +179,21 @@ class Series:
     def __init__(self, data: Iterable[object], index: Sequence[object] | None = None, name: str | None = None):
         self._data: List[object] = list(data)
         if index is None:
-            self.index: Index = _ensure_index(range(len(self._data)))
+            self.index = range(len(self._data))
         else:
-            self.index = _ensure_index(index)
+            self.index = index
         self.name = name
+
+    @property
+    def index(self) -> Index:
+        return self._index
+
+    @index.setter
+    def index(self, new_index) -> None:
+        ensured = _ensure_index(new_index)
+        if len(ensured) != len(self._data):
+            raise ValueError("Index length does not match data length")
+        self._index = ensured
 
     # ------------------------------------------------------------------
     # Container protocol
@@ -440,7 +451,7 @@ class DataFrame:
     def __init__(self, data: Mapping[str, Iterable[object]], index: Sequence[object] | None = None):
         if not data:
             self._data: Dict[str, Series] = {}
-            self.index: Index = _ensure_index(index or [])
+            self.index = index or []
             self._columns_name: str | None = None
             return
 
@@ -456,7 +467,7 @@ class DataFrame:
         if inferred_length is None:
             inferred_length = len(index) if index is not None else 0
         if index is None:
-            self.index = _ensure_index(range(inferred_length))
+            self.index = range(inferred_length)
         else:
             ensured_index = _ensure_index(index)
             if len(ensured_index) != inferred_length:
@@ -476,6 +487,14 @@ class DataFrame:
             for name, values in data.items()
         }
         self._columns_name: str | None = None
+
+    @property
+    def index(self) -> Index:
+        return self._index
+
+    @index.setter
+    def index(self, new_index) -> None:
+        self._index = _ensure_index(new_index)
 
     # ------------------------------------------------------------------
     # Container protocol
