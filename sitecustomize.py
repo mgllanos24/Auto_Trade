@@ -12,7 +12,10 @@ import os
 import sys
 import types
 
-ROOT = os.path.dirname(__file__)
+try:
+    ROOT = os.path.dirname(__file__)
+except NameError:  # pragma: no cover - defensive fallback for embedded interpreters
+    ROOT = os.getcwd()
 
 
 def _load_module(name: str, relative_path: str) -> None:
