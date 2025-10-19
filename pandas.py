@@ -49,33 +49,85 @@ def _to_float(value: object) -> float:
 
 
 class Index(list):  # pragma: no cover - simple container
-    def __init__(self, data: Iterable[object] | None = None, name: str | None = None):
+    def __init__(
+        self,
+        data: Iterable[object] | None = None,
+        name: str | None = None,
+        tz: _dt.tzinfo | None = None,
+    ):
         if data is None:
-            data = []
-        super().__init__(list(data))
+            values: List[object] = []
+        else:
+            values = list(data)
+        super().__init__(values)
         self.name = name
+
+        if tz is None:
+            inferred_tz = None
+            for value in values:
+                tzinfo = getattr(value, "tzinfo", None)
+                if tzinfo is not None:
+                    inferred_tz = tzinfo
+                    break
+            tz = inferred_tz
+        self._tz = tz
 
     def __getitem__(self, item):
         result = super().__getitem__(item)
         if isinstance(item, slice):
-            return Index(result, name=self.name)
+            return Index(result, name=self.name, tz=self._tz)
         return result
 
     def copy(self) -> "Index":
-        return Index(self, name=self.name)
+        copied = Index(self, name=self.name, tz=self._tz)
+        return copied
 
     def __getattr__(self, attr):
-        if attr == "tz":
-            preview = self[:5]
-            stack = "".join(traceback.format_stack(limit=6))
-            print(
-                "[pandas.Index DEBUG] Attempted access to missing 'tz' attribute",
-                f"(name={self.name!r}, size={len(self)}, sample={preview})\n",
-                stack,
-                sep=" ",
-                file=sys.stderr,
-            )
         raise AttributeError(f"'Index' object has no attribute '{attr}'")
+
+    @property
+    def tz(self):  # pragma: no cover - minimal compatibility shim
+        return self._tz
+
+    def tz_localize(self, tz):  # pragma: no cover - compatibility helper with debug output
+        debug_details: Dict[str, object] = {
+            "name": self.name,
+            "incoming_tz": tz,
+            "has_existing_tz": self._tz is not None,
+            "sample_values": list(self[:5]),
+        }
+        print(f"[pandas.Index DEBUG] tz_localize invoked: {debug_details}")
+
+        tzinfo = tz
+        if isinstance(tz, str):
+            if tz.upper() == "UTC":
+                tzinfo = _dt.timezone.utc
+            else:
+                try:  # pragma: no cover - depends on optional zoneinfo
+                    from zoneinfo import ZoneInfo
+
+                    tzinfo = ZoneInfo(tz)
+                except Exception:
+                    print(
+                        "[pandas.Index DEBUG] Unable to resolve timezone string; "
+                        "preserving original values"
+                    )
+                    tzinfo = None
+
+        if tzinfo is None:
+            print(
+                "[pandas.Index DEBUG] No timezone information available after tz_localize"
+            )
+            return self.copy()
+
+        localized_values: List[object] = []
+        for value in self:
+            if isinstance(value, _dt.datetime) and value.tzinfo is None:
+                localized_values.append(value.replace(tzinfo=tzinfo))
+            else:
+                localized_values.append(value)
+
+        return Index(localized_values, name=self.name, tz=tzinfo)
 
 
 class RangeIndex(Index):  # pragma: no cover - simple container
