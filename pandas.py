@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import csv
 from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import numpy as np
@@ -417,6 +418,11 @@ class DataFrame:
         start = max(0, len(self.index) - n)
         return self.iloc[start:]
 
+    def iterrows(self):
+        for position, idx in enumerate(self.index):
+            row_values = [self._data[col]._data[position] for col in self.columns]
+            yield idx, Series(row_values, index=self.columns, name=idx)
+
     # ------------------------------------------------------------------
     # Mutating helpers used in the project code
     # ------------------------------------------------------------------
@@ -520,6 +526,66 @@ DataFrame.from_records = classmethod(_from_records)
 del _from_records
 
 
+def read_csv(filepath_or_buffer, index_col=None, parse_dates=False) -> DataFrame:
+    close_after = False
+    if hasattr(filepath_or_buffer, "read"):
+        handle = filepath_or_buffer
+    else:
+        handle = open(filepath_or_buffer, "r", newline="", encoding="utf-8")
+        close_after = True
+    try:
+        reader = csv.reader(handle)
+        rows = list(reader)
+    finally:
+        if close_after:
+            handle.close()
+
+    if not rows:
+        return DataFrame({}, index=[])
+
+    header = rows[0]
+    data_rows = rows[1:]
+
+    def _normalise_column(column):
+        if isinstance(column, int):
+            return header[column]
+        return column
+
+    parse_targets: List[str] = []
+    if parse_dates:
+        if parse_dates is True:
+            if index_col is not None:
+                parse_targets = [_normalise_column(index_col)]
+            else:
+                parse_targets = header[:]
+        elif isinstance(parse_dates, (list, tuple, set)):
+            parse_targets = [_normalise_column(col) for col in parse_dates]
+        else:
+            parse_targets = [_normalise_column(parse_dates)]
+
+    columns = {name: [] for name in header}
+    for row in data_rows:
+        if len(row) < len(header):
+            row = row + [""] * (len(header) - len(row))
+        for idx, name in enumerate(header):
+            raw_value = row[idx]
+            if raw_value == "":
+                value = float("nan")
+            elif name in parse_targets:
+                value = to_datetime(raw_value)
+            else:
+                value = raw_value
+            columns[name].append(value)
+
+    index_values: List[object] | None = None
+    if index_col is not None:
+        index_name = _normalise_column(index_col)
+        if index_name not in columns:
+            raise KeyError(index_name)
+        index_values = columns.pop(index_name)
+    return DataFrame(columns, index=index_values)
+
+
 __all__ = [
     "DataFrame",
     "NaT",
@@ -528,6 +594,7 @@ __all__ = [
     "Timestamp",
     "concat",
     "date_range",
+    "read_csv",
     "to_datetime",
 ]
 
