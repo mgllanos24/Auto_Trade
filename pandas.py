@@ -89,46 +89,6 @@ class Index(list):  # pragma: no cover - simple container
     def tz(self):  # pragma: no cover - minimal compatibility shim
         return self._tz
 
-    def tz_localize(self, tz):  # pragma: no cover - compatibility helper with debug output
-        debug_details: Dict[str, object] = {
-            "name": self.name,
-            "incoming_tz": tz,
-            "has_existing_tz": self._tz is not None,
-            "sample_values": list(self[:5]),
-        }
-        print(f"[pandas.Index DEBUG] tz_localize invoked: {debug_details}")
-
-        tzinfo = tz
-        if isinstance(tz, str):
-            if tz.upper() == "UTC":
-                tzinfo = _dt.timezone.utc
-            else:
-                try:  # pragma: no cover - depends on optional zoneinfo
-                    from zoneinfo import ZoneInfo
-
-                    tzinfo = ZoneInfo(tz)
-                except Exception:
-                    print(
-                        "[pandas.Index DEBUG] Unable to resolve timezone string; "
-                        "preserving original values"
-                    )
-                    tzinfo = None
-
-        if tzinfo is None:
-            print(
-                "[pandas.Index DEBUG] No timezone information available after tz_localize"
-            )
-            return self.copy()
-
-        localized_values: List[object] = []
-        for value in self:
-            if isinstance(value, _dt.datetime) and value.tzinfo is None:
-                localized_values.append(value.replace(tzinfo=tzinfo))
-            else:
-                localized_values.append(value)
-
-        return Index(localized_values, name=self.name, tz=tzinfo)
-
 
 class RangeIndex(Index):  # pragma: no cover - simple container
     def __init__(self, data: Iterable[object] | int | None = None, name: str | None = None):
