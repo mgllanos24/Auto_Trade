@@ -393,6 +393,12 @@ class DataFrame:
             return DataFrame({name: self._data[name]._data for name in key}, index=self.index[:])
         return self._data[key].copy()
 
+    def iterrows(self):
+        column_names = self.columns
+        for position, label in enumerate(self.index):
+            values = [self._data[name]._data[position] for name in column_names]
+            yield label, Series(values, index=column_names, name=label)
+
     def __setitem__(self, key: str, value) -> None:
         if isinstance(value, Series):
             if value.index != self.index:
