@@ -66,39 +66,11 @@ class Index(list):  # pragma: no cover - simple container
 
     def __getattr__(self, attr):
         if attr == "tz":
-            preview = list(self[:5])
-            inspected = list(self[: min(len(self), 20)])
-            naive_datetimes = 0
-            aware_datetimes = 0
-            non_datetime_values = 0
-            tz_labels = []
-            for value in inspected:
-                if isinstance(value, _dt.datetime):
-                    if value.tzinfo is None:
-                        naive_datetimes += 1
-                        tz_labels.append("naive")
-                    else:
-                        aware_datetimes += 1
-                        tzinfo = value.tzinfo
-                        tz_name = getattr(tzinfo, "zone", None) or getattr(
-                            tzinfo, "key", None
-                        )
-                        if tz_name is None:
-                            try:
-                                tz_name = tzinfo.tzname(value)
-                            except Exception:  # pragma: no cover - diagnostic only
-                                tz_name = repr(tzinfo)
-                        tz_labels.append(str(tz_name))
-                else:
-                    non_datetime_values += 1
-                    tz_labels.append(type(value).__name__)
-            stack = "".join(traceback.format_stack(limit=8))
+            preview = self[:5]
+            stack = "".join(traceback.format_stack(limit=6))
             print(
                 "[pandas.Index DEBUG] Attempted access to missing 'tz' attribute",
-                f"(name={self.name!r}, size={len(self)}, sample={preview})",
-                f"tz-inspection={{naive:{naive_datetimes}, aware:{aware_datetimes}, non-datetime:{non_datetime_values}, inspected:{len(inspected)}}}",
-                f"tz-labels={tz_labels}",
-                "\n",
+                f"(name={self.name!r}, size={len(self)}, sample={preview})\n",
                 stack,
                 sep=" ",
                 file=sys.stderr,
