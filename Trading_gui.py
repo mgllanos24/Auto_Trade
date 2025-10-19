@@ -25,7 +25,10 @@ import time
 import threading
 import signal
 import json
+from datetime import datetime
 from typing import Any, Callable, Optional
+from urllib.error import URLError
+from urllib.request import urlopen
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
 
@@ -70,6 +73,8 @@ root.geometry("1400x900")
 
 symbol_data = {}
 _long_name_cache = {}
+_institution_activity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
 
@@ -89,6 +94,78 @@ def _resolve_min_size(kwargs: dict[str, Any], fallback: int = 40) -> int:
         return int(cup_window) + int(handle_window)
 
     return fallback
+
+
+def _format_share_amount(value: Optional[float]) -> str:
+    if value is None:
+        return "0"
+    absolute = abs(value)
+    suffixes = ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K"))
+    for threshold, suffix in suffixes:
+        if absolute >= threshold:
+            return f"{value / threshold:.1f}{suffix}"
+    return f"{value:.0f}"
+
+
+def _normalise_report_date(raw: Any) -> str:
+    if not raw:
+        return "N/A"
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(raw).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            return str(raw)
+    return str(raw)
+
+
+def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str]]:
+    now = time.time()
+    cached = _institution_activity_cache.get(symbol)
+    if cached and now - cached[0] < INSTITUTION_CACHE_TTL:
+        return cached[1], None
+
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=institutionOwnership"
+    try:
+        with urlopen(url, timeout=10) as response:
+            payload = json.load(response)
+    except URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return [], f"Unable to load institutional activity ({reason})."
+    except Exception as exc:  # pragma: no cover - defensive
+        return [], f"Unable to load institutional activity ({exc})."
+
+    try:
+        results = payload.get("quoteSummary", {}).get("result", [])
+        if not results:
+            _institution_activity_cache[symbol] = (now, [])
+            return [], None
+        ownership = results[0].get("institutionOwnership", {})
+        raw_entries = ownership.get("ownershipList", [])
+    except AttributeError:
+        _institution_activity_cache[symbol] = (now, [])
+        return [], None
+
+    parsed_entries: list[dict[str, Any]] = []
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        net_activity = entry.get("netActivity")
+        purchased = entry.get("purchased")
+        sold = entry.get("soldOut")
+        organization = entry.get("organization") or "Unknown"
+        parsed_entries.append(
+            {
+                "organization": organization,
+                "net_activity": net_activity if net_activity is not None else 0,
+                "purchased": purchased if purchased is not None else 0,
+                "sold": sold if sold is not None else 0,
+                "report_date": _normalise_report_date(entry.get("reportDate")),
+            }
+        )
+
+    parsed_entries.sort(key=lambda item: abs(item.get("net_activity", 0)), reverse=True)
+    _institution_activity_cache[symbol] = (now, parsed_entries)
+    return parsed_entries, None
 
 
 def _detect_with_trimming(
@@ -365,6 +442,108 @@ def show_candlestick():
     df = symbol_data[sym]
     for w in chart_frame.winfo_children():
         w.destroy()
+
+    activity_entries, activity_error = fetch_institution_activity(sym)
+
+    info_panel = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
+    info_panel.pack(side="left", fill="y", padx=(0, 10), pady=5)
+    info_panel.pack_propagate(False)
+
+    tk.Label(
+        info_panel,
+        text="Institutional Activity",
+        font=("Arial", 12, "bold"),
+        anchor="w",
+        bg="#f5f5f5",
+    ).pack(fill="x")
+
+    content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
+
+    if activity_error:
+        tk.Label(
+            info_panel,
+            text=activity_error,
+            justify="left",
+            wraplength=240,
+            fg="red",
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(fill="x", padx=4, pady=6)
+    elif not activity_entries:
+        tk.Label(
+            info_panel,
+            text="No recent institutional accumulation or selling reported.",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(fill="x", padx=4, pady=6)
+    else:
+        total_net = sum(entry.get("net_activity", 0) or 0 for entry in activity_entries)
+        net_color = "green" if total_net > 0 else "red" if total_net < 0 else "#555555"
+        tk.Label(
+            info_panel,
+            text=f"Net activity: {_format_share_amount(total_net)} shares",
+            fg=net_color,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(fill="x", padx=4, pady=(6, 2))
+
+        for entry in activity_entries[:6]:
+            frame = tk.Frame(info_panel, bg="#f5f5f5")
+            frame.pack(fill="x", padx=2, pady=(4, 0))
+
+            tk.Label(
+                frame,
+                text=entry.get("organization", "Unknown"),
+                font=("Arial", 10, "bold"),
+                bg="#f5f5f5",
+                anchor="w",
+                justify="left",
+                wraplength=240,
+            ).pack(fill="x")
+
+            net_value = entry.get("net_activity", 0) or 0
+            if net_value > 0:
+                action_text = "Accumulated"
+                action_color = "green"
+                net_display = _format_share_amount(net_value)
+            elif net_value < 0:
+                action_text = "Sold"
+                action_color = "red"
+                net_display = _format_share_amount(abs(net_value))
+            else:
+                action_text = "No net change"
+                action_color = "#555555"
+                net_display = "0"
+
+            tk.Label(
+                frame,
+                text=f"{action_text}: {net_display} shares",
+                fg=action_color,
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(**content_pad)
+
+            purchased = entry.get("purchased", 0) or 0
+            sold = entry.get("sold", 0) or 0
+            tk.Label(
+                frame,
+                text=f"Bought: {_format_share_amount(purchased)} | Sold: {_format_share_amount(sold)}",
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(**content_pad)
+
+            tk.Label(
+                frame,
+                text=f"Report: {entry.get('report_date', 'N/A')}",
+                fg="#666666",
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(**content_pad)
+
+    canvas_container = tk.Frame(chart_frame)
+    canvas_container.pack(side="left", fill="both", expand=True)
 
     price_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     plot_df = df[price_columns].dropna().copy()
@@ -786,8 +965,7 @@ def show_candlestick():
     ax_price.yaxis.set_label_position('right')
     ax_price.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
 
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+    canvas = FigureCanvasTkAgg(fig, master=canvas_container)
     canvas.draw()
     canvas.get_tk_widget().pack(fill="both", expand=True)
 def load_watchlist():
