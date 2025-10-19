@@ -46,8 +46,39 @@ def _to_float(value: object) -> float:
         return float("nan")
 
 
-class RangeIndex(list):  # pragma: no cover - simple container
-    pass
+class Index(list):  # pragma: no cover - simple container
+    def __init__(self, data: Iterable[object] | None = None, name: str | None = None):
+        if data is None:
+            data = []
+        super().__init__(list(data))
+        self.name = name
+
+    def __getitem__(self, item):
+        result = super().__getitem__(item)
+        if isinstance(item, slice):
+            return Index(result, name=self.name)
+        return result
+
+    def copy(self) -> "Index":
+        return Index(self, name=self.name)
+
+
+class RangeIndex(Index):  # pragma: no cover - simple container
+    def __init__(self, data: Iterable[object] | int | None = None, name: str | None = None):
+        if data is None:
+            values = []
+        elif isinstance(data, int):
+            values = range(data)
+        else:
+            values = data
+        super().__init__(values, name=name)
+
+
+def _ensure_index(values: Sequence[object] | Index, *, name: str | None = None) -> Index:
+    if isinstance(values, Index):
+        return values.copy()
+    inferred_name = name if name is not None else getattr(values, "name", None)
+    return Index(values, name=inferred_name)
 
 
 class _TimestampFactory:
@@ -88,25 +119,49 @@ def date_range(start: str, periods: int, freq: str = "D") -> List[_dt.datetime]:
     return [start_dt + step * i for i in range(periods)]
 
 
-def to_datetime(values, utc: bool = False):  # pragma: no cover - minimal helper
+def to_datetime(values, utc: bool = False, unit: str | None = None):  # pragma: no cover - minimal helper
+    def _unit_to_seconds(value):
+        if unit is None:
+            return value
+        multipliers = {
+            "s": 1,
+            "ms": 1e-3,
+            "us": 1e-6,
+            "ns": 1e-9,
+            "m": 60,
+            "h": 3600,
+            "d": 86400,
+        }
+        if unit not in multipliers:
+            raise ValueError(f"Unsupported unit '{unit}'")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return value
+        return numeric * multipliers[unit]
+
+    def _convert(value):
+        scaled = _unit_to_seconds(value)
+        ts = Timestamp(scaled)
+        if utc and isinstance(ts, _dt.datetime):
+            return ts.replace(tzinfo=_dt.timezone.utc)
+        return ts
+
     if isinstance(values, Series):
-        converted = [Timestamp(val) for val in values]
+        converted = [_convert(val) for val in values]
         return Series(converted, index=values.index[:], name=values.name)
     if isinstance(values, list):
-        return [Timestamp(val) for val in values]
-    result = Timestamp(values)
-    if utc and isinstance(result, _dt.datetime):
-        return result.replace(tzinfo=_dt.timezone.utc)
-    return result
+        return [_convert(val) for val in values]
+    return _convert(values)
 
 
 class Series:
     def __init__(self, data: Iterable[object], index: Sequence[object] | None = None, name: str | None = None):
         self._data: List[object] = list(data)
         if index is None:
-            self.index: List[object] = list(range(len(self._data)))
+            self.index: Index = _ensure_index(range(len(self._data)))
         else:
-            self.index = list(index)
+            self.index = _ensure_index(index)
         self.name = name
 
     # ------------------------------------------------------------------
@@ -305,7 +360,7 @@ class _SeriesILoc:
         if isinstance(key, slice):
             start, stop, step = key.indices(len(self._series))
             data = [self._series._data[i] for i in range(start, stop, step)]
-            index = [self._series.index[i] for i in range(start, stop, step)]
+            index = _ensure_index([self._series.index[i] for i in range(start, stop, step)], name=self._series.index.name)
             return Series(data, index=index, name=self._series.name)
         idx = key
         if idx < 0:
@@ -365,7 +420,7 @@ class DataFrame:
     def __init__(self, data: Mapping[str, Iterable[object]], index: Sequence[object] | None = None):
         if not data:
             self._data: Dict[str, Series] = {}
-            self.index: List[object] = list(index or [])
+            self.index: Index = _ensure_index(index or [])
             return
 
         inferred_length = None
@@ -380,11 +435,12 @@ class DataFrame:
         if inferred_length is None:
             inferred_length = len(index) if index is not None else 0
         if index is None:
-            self.index = list(range(inferred_length))
+            self.index = _ensure_index(range(inferred_length))
         else:
-            self.index = list(index)
-            if len(self.index) != inferred_length:
+            ensured_index = _ensure_index(index)
+            if len(ensured_index) != inferred_length:
                 raise ValueError("Index length does not match data length")
+            self.index = ensured_index
 
         def _ensure_list(values):
             if _is_scalar(values):
@@ -481,7 +537,7 @@ class DataFrame:
         new_index = self._data[column]._data[:]
         remaining = {name: series._data[:] for name, series in self._data.items() if name != column}
         if inplace:
-            self.index = list(new_index)
+            self.index = _ensure_index(new_index)
             self._data = {name: Series(values, index=self.index[:], name=name) for name, values in remaining.items()}
             return self
         return DataFrame(remaining, index=list(new_index))
@@ -516,7 +572,7 @@ class _DataFrameILoc:
     def __getitem__(self, key):
         if isinstance(key, slice):
             start, stop, step = key.indices(len(self._frame.index))
-            new_index = [self._frame.index[i] for i in range(start, stop, step)]
+            new_index = _ensure_index([self._frame.index[i] for i in range(start, stop, step)], name=self._frame.index.name)
             data = {name: [series._data[i] for i in range(start, stop, step)] for name, series in self._frame._data.items()}
             return DataFrame(data, index=new_index)
         raise TypeError("Only slicing is supported in iloc")
