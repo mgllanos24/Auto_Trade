@@ -13,6 +13,8 @@ import datetime as _dt
 import math
 from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
+import csv
+
 import numpy as np
 
 # Provide a ``__version__`` attribute so libraries performing runtime
@@ -520,6 +522,74 @@ DataFrame.from_records = classmethod(_from_records)
 del _from_records
 
 
+def _coerce_value(value: str | None) -> object:
+    """Best-effort conversion of CSV field values.
+
+    The lightweight shim mirrors pandas' behaviour by interpreting blank values
+    as ``NaN`` and attempting numeric conversion before falling back to the raw
+    string.  The heuristics are intentionally conservative but sufficient for
+    the data processed in the tests and application code.
+    """
+
+    if value in ("", None):
+        return float("nan")
+    try:
+        # Try integer conversion first so we do not lose precision for whole
+        # numbers.  If that fails, attempt a float conversion.
+        as_int = int(value)
+        if str(as_int) == value:
+            return as_int
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return value
+
+
+def read_csv(path: str, index_col: str | int | None = None, **kwargs) -> "DataFrame":
+    """Parse a CSV file into a :class:`DataFrame`.
+
+    Only a very small subset of pandas' ``read_csv`` API is implemented –
+    enough for the application code to load watchlists and historical price
+    data.  Unsupported keyword arguments raise ``NotImplementedError`` so that
+    unexpected usages surface clearly during testing.
+    """
+
+    unsupported = set(kwargs) - {"encoding", "newline"}
+    if unsupported:
+        raise NotImplementedError(f"Unsupported arguments: {', '.join(sorted(unsupported))}")
+
+    encoding = kwargs.get("encoding", "utf-8")
+    newline = kwargs.get("newline", "")
+
+    with open(path, "r", encoding=encoding, newline=newline) as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        records: List[Dict[str, object]] = []
+        for row in reader:
+            converted = {key: _coerce_value(value) for key, value in row.items()}
+            records.append(converted)
+
+    frame = DataFrame.from_records(records)
+
+    if index_col is None:
+        return frame
+
+    if isinstance(index_col, int):
+        try:
+            column_name = fieldnames[index_col]
+        except (TypeError, IndexError):  # pragma: no cover - defensive
+            raise KeyError(index_col)
+    else:
+        column_name = index_col
+
+    if column_name not in frame.columns:
+        raise KeyError(column_name)
+
+    return frame.set_index(column_name, inplace=False)
+
+
 __all__ = [
     "DataFrame",
     "NaT",
@@ -528,6 +598,7 @@ __all__ = [
     "Timestamp",
     "concat",
     "date_range",
+    "read_csv",
     "to_datetime",
 ]
 
