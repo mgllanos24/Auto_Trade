@@ -12,10 +12,15 @@ import os
 import sys
 import types
 
-try:
-    ROOT = os.path.dirname(__file__)
-except NameError:  # pragma: no cover - defensive fallback for embedded interpreters
+_MODULE_FILE = globals().get("__file__")
+if _MODULE_FILE is None:  # pragma: no cover - embedded interpreter fallback
     ROOT = os.getcwd()
+    print(
+        "[sitecustomize DEBUG] __file__ is undefined; using working directory",
+        ROOT,
+    )
+else:
+    ROOT = os.path.dirname(_MODULE_FILE)
 
 
 def _load_module(name: str, relative_path: str) -> None:
