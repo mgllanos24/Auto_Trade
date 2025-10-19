@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import sys
+import traceback
 from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import csv
@@ -61,6 +63,19 @@ class Index(list):  # pragma: no cover - simple container
 
     def copy(self) -> "Index":
         return Index(self, name=self.name)
+
+    def __getattr__(self, attr):
+        if attr == "tz":
+            preview = self[:5]
+            stack = "".join(traceback.format_stack(limit=6))
+            print(
+                "[pandas.Index DEBUG] Attempted access to missing 'tz' attribute",
+                f"(name={self.name!r}, size={len(self)}, sample={preview})\n",
+                stack,
+                sep=" ",
+                file=sys.stderr,
+            )
+        raise AttributeError(f"'Index' object has no attribute '{attr}'")
 
 
 class RangeIndex(Index):  # pragma: no cover - simple container
