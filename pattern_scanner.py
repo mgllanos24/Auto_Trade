@@ -279,10 +279,17 @@ def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
 
     offset = len(df) - len(recent)
 
-    for i in range(len(troughs) - 2):
+    recency_window = 10
+
+    for i in range(len(troughs) - 2, -1, -1):
         l_idx = int(troughs[i])
+        if i + 2 >= len(troughs):
+            continue
         h_idx = int(troughs[i + 1])
         r_idx = int(troughs[i + 2])
+
+        if offset + r_idx < len(df) - recency_window:
+            break
 
         l = float(lows[l_idx])
         h = float(lows[h_idx])
