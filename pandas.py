@@ -119,7 +119,17 @@ class Series:
         return iter(self._data)
 
     def __getitem__(self, key):
-        return self._data[key]
+        if isinstance(key, slice):  # pragma: no cover - simple container slicing
+            return Series(self._data[key], index=self.index[key], name=self.name)
+
+        if isinstance(key, int):  # pragma: no cover - trivial positional access
+            return self._data[key]
+
+        if key in self.index:
+            position = self.index.index(key)
+            return self._data[position]
+
+        raise KeyError(key)
 
     @property
     def empty(self) -> bool:
