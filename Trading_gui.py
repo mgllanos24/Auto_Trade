@@ -30,6 +30,22 @@ from alpaca_trade_api.rest import TimeFrame
 
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
+from pattern_scanner import (
+    AscendingTrianglePattern,
+    BreakawayGapPattern,
+    BullishFlagPattern,
+    BullishPennantPattern,
+    BullishRectanglePattern,
+    InverseHeadShouldersPattern,
+    RoundingBottomPattern,
+    detect_ascending_triangle,
+    detect_breakaway_gap,
+    detect_bullish_flag,
+    detect_bullish_pennant,
+    detect_bullish_rectangle,
+    detect_inverse_head_shoulders,
+    detect_rounding_bottom,
+)
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -438,6 +454,143 @@ def show_candlestick():
                 resistance = hit.resistance
                 ax_price.axhline(resistance, color='#9467bd', linestyle='--', linewidth=1.5, label='Resistance')
                 overlay_added = True
+        elif name_lower == "inverse head and shoulders":
+            ihs = detect_inverse_head_shoulders(analysis_df)
+            if isinstance(ihs, InverseHeadShouldersPattern):
+                try:
+                    indices = [ihs.left_idx, ihs.head_idx, ihs.right_idx]
+                    lows = [ihs.left_low, ihs.head_low, ihs.right_low]
+                    valid = [idx for idx in indices if 0 <= idx < len(plot_df)]
+                    if len(valid) == 3:
+                        dates = [plot_df['Date'].iloc[idx] for idx in indices]
+                        ax_price.scatter(dates, lows, color='#d62728', s=50, label='Shoulders/Head', zorder=6)
+                        overlay_added = True
+
+                    if 0 <= ihs.neckline_left_idx < len(plot_df) and 0 <= ihs.neckline_right_idx < len(plot_df):
+                        neck_dates = [
+                            plot_df['Date'].iloc[ihs.neckline_left_idx],
+                            plot_df['Date'].iloc[ihs.neckline_right_idx],
+                        ]
+                        neck_prices = [ihs.neckline_left, ihs.neckline_right]
+                        ax_price.plot(neck_dates, neck_prices, color='#9467bd', linestyle='--', linewidth=1.5, label='Neckline')
+                        overlay_added = True
+                except Exception:
+                    pass
+        elif name_lower == "ascending triangle":
+            triangle = detect_ascending_triangle(analysis_df)
+            if isinstance(triangle, AscendingTrianglePattern):
+                start_idx = triangle.offset
+                end_idx = triangle.offset + triangle.length - 1
+                if 0 <= start_idx < end_idx < len(plot_df):
+                    dates = plot_df['Date'].iloc[[start_idx, end_idx]].to_numpy()
+                    support_start = triangle.support_intercept
+                    support_end = triangle.support_slope * (triangle.length - 1) + triangle.support_intercept
+                    ax_price.plot(dates, [support_start, support_end], color='#ff7f0e', linewidth=1.5, label='Rising Support')
+                    overlay_added = True
+
+                    ax_price.hlines(
+                        triangle.resistance,
+                        dates[0],
+                        dates[-1],
+                        colors='#2ca02c',
+                        linestyles='--',
+                        linewidth=1.5,
+                        label='Flat Resistance',
+                    )
+                    overlay_added = True
+
+                    res_label = 'Resistance Touch'
+                    for idx in triangle.resistance_indices:
+                        if 0 <= idx < len(plot_df):
+                            ax_price.scatter(
+                                plot_df['Date'].iloc[idx],
+                                analysis_df['high'].iloc[idx],
+                                color='#1f77b4',
+                                s=35,
+                                zorder=6,
+                                label=res_label,
+                            )
+                            res_label = None
+                            overlay_added = True
+
+                    sup_label = 'Support Touch'
+                    for idx in triangle.support_indices:
+                        if 0 <= idx < len(plot_df):
+                            ax_price.scatter(
+                                plot_df['Date'].iloc[idx],
+                                analysis_df['low'].iloc[idx],
+                                color='#d62728',
+                                s=35,
+                                zorder=6,
+                                label=sup_label,
+                            )
+                            sup_label = None
+                            overlay_added = True
+        elif name_lower == "bullish pennant":
+            pennant = detect_bullish_pennant(analysis_df)
+            if isinstance(pennant, BullishPennantPattern):
+                start_idx = pennant.offset
+                end_idx = pennant.offset + pennant.length - 1
+                if 0 <= start_idx < end_idx < len(plot_df):
+                    dates = plot_df['Date'].iloc[[start_idx, end_idx]].to_numpy()
+                    upper_start = pennant.upper_intercept
+                    upper_end = pennant.upper_slope * (pennant.length - 1) + pennant.upper_intercept
+                    lower_start = pennant.lower_intercept
+                    lower_end = pennant.lower_slope * (pennant.length - 1) + pennant.lower_intercept
+
+                    ax_price.plot(dates, [upper_start, upper_end], color='#9467bd', linewidth=1.5, label='Pennant Upper')
+                    ax_price.plot(dates, [lower_start, lower_end], color='#ff7f0e', linewidth=1.5, label='Pennant Lower')
+                    overlay_added = True
+        elif name_lower == "bullish flag":
+            flag = detect_bullish_flag(analysis_df)
+            if isinstance(flag, BullishFlagPattern):
+                start_idx = flag.offset
+                end_idx = flag.offset + flag.length - 1
+                if 0 <= start_idx < end_idx < len(plot_df):
+                    dates = plot_df['Date'].iloc[[start_idx, end_idx]].to_numpy()
+                    base_start = flag.intercept
+                    base_end = flag.slope * (flag.length - 1) + flag.intercept
+                    upper_line = [base_start + flag.upper_offset, base_end + flag.upper_offset]
+                    lower_line = [base_start + flag.lower_offset, base_end + flag.lower_offset]
+
+                    ax_price.plot(dates, upper_line, color='#9467bd', linewidth=1.5, label='Flag Upper')
+                    ax_price.plot(dates, lower_line, color='#ff7f0e', linewidth=1.5, label='Flag Lower')
+                    overlay_added = True
+        elif name_lower == "bullish rectangle":
+            rectangle = detect_bullish_rectangle(analysis_df)
+            if isinstance(rectangle, BullishRectanglePattern):
+                start_idx = rectangle.offset
+                end_idx = rectangle.offset + rectangle.length - 1
+                if 0 <= start_idx < end_idx < len(plot_df):
+                    dates = plot_df['Date'].iloc[[start_idx, end_idx]].to_numpy()
+                    ax_price.hlines(rectangle.high, dates[0], dates[-1], colors='#1f77b4', linestyles='--', linewidth=1.5, label='Rectangle High')
+                    ax_price.hlines(rectangle.low, dates[0], dates[-1], colors='#d62728', linestyles='--', linewidth=1.5, label='Rectangle Low')
+                    overlay_added = True
+        elif name_lower == "rounding bottom":
+            rounding = detect_rounding_bottom(analysis_df)
+            if isinstance(rounding, RoundingBottomPattern):
+                start_idx = rounding.offset
+                end_idx = rounding.offset + rounding.length - 1
+                if 0 <= start_idx < end_idx < len(plot_df):
+                    poly = np.poly1d(rounding.coeffs)
+                    local_x = np.linspace(0, rounding.length - 1, 100)
+                    curve_y = poly(local_x)
+                    global_indices = np.linspace(start_idx, end_idx, 100)
+                    index_array = np.arange(len(plot_df))
+                    date_values = np.interp(global_indices, index_array, plot_df['Date'].values)
+                    ax_price.plot(date_values, curve_y, color='#2ca02c', linewidth=1.5, label='Rounded Base')
+                    overlay_added = True
+        elif name_lower == "breakaway gap":
+            gap = detect_breakaway_gap(analysis_df)
+            if isinstance(gap, BreakawayGapPattern):
+                prev_idx = gap.prev_close_idx
+                curr_idx = gap.curr_open_idx
+                if 0 <= prev_idx < len(plot_df) and 0 <= curr_idx < len(plot_df):
+                    prev_date = plot_df['Date'].iloc[prev_idx]
+                    curr_date = plot_df['Date'].iloc[curr_idx]
+                    ax_price.vlines(curr_date, gap.prev_close, gap.curr_open, colors='#ff7f0e', linewidth=2, label='Gap')
+                    ax_price.scatter([curr_date], [gap.curr_close], color='#2ca02c', marker='^', s=60, zorder=6, label='Gap Close')
+                    overlay_added = True
 
     if overlay_added:
         handles, labels = ax_price.get_legend_handles_labels()
