@@ -12,7 +12,7 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+from typing import Sequence
 
 
 @dataclass
@@ -42,14 +42,39 @@ class DoubleBottomHit:
 def _linreg(x: Iterable[float], y: Iterable[float]) -> tuple[float, float]:
     """Return the slope and intercept of a simple linear regression."""
 
-    x_arr = np.asarray(list(x), dtype=float)
-    y_arr = np.asarray(list(y), dtype=float)
+    x_arr = [float(val) for val in x]
+    y_arr = [float(val) for val in y]
 
-    if x_arr.size == 0 or y_arr.size == 0 or x_arr.size != y_arr.size:
+    if not x_arr or not y_arr or len(x_arr) != len(y_arr):
         raise ValueError("x and y must be non-empty sequences of equal length")
 
-    slope, intercept = np.polyfit(x_arr, y_arr, 1)
+    x_mean = float(np.mean(x_arr))
+    y_mean = float(np.mean(y_arr))
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_arr, y_arr))
+    denominator = sum((x - x_mean) ** 2 for x in x_arr)
+    if denominator == 0:
+        return 0.0, y_mean
+    slope = numerator / denominator
+    intercept = y_mean - slope * x_mean
     return float(slope), float(intercept)
+
+
+def _find_troughs(values: Sequence[float], distance: int) -> List[int]:
+    """Return indices of local minima separated by at least ``distance``."""
+
+    data = list(values)
+    n = len(data)
+    if n < 3:
+        return []
+
+    distance = max(int(distance), 1)
+    troughs: List[int] = []
+    for idx in range(1, n - 1):
+        if data[idx] < data[idx - 1] and data[idx] < data[idx + 1]:
+            if troughs and idx - troughs[-1] < distance:
+                continue
+            troughs.append(idx)
+    return troughs
 
 
 def _count_touches(values: Iterable[float], level: float, tolerance: float) -> int:
@@ -113,7 +138,7 @@ def scan_double_bottoms(
         lows = segment["low"].to_numpy()
         highs = segment["high"].to_numpy()
 
-        troughs, _ = find_peaks(-lows, distance=2)
+        troughs = _find_troughs(lows, distance=2)
         if len(troughs) < 2:
             continue
 
