@@ -10,7 +10,8 @@ from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
-from typing import List
+from dataclasses import dataclass
+from typing import List, Optional, Sequence
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
@@ -40,6 +41,78 @@ WATCHLIST_HEADER = [
 ]
 
 SWING_CONFIG = SwingScreenerConfig()
+
+
+@dataclass
+class AscendingTrianglePattern:
+    resistance: float
+    support_slope: float
+    support_intercept: float
+    offset: int
+    length: int
+    resistance_indices: List[int]
+    support_indices: List[int]
+    breakout: bool
+
+
+@dataclass
+class InverseHeadShouldersPattern:
+    left_idx: int
+    head_idx: int
+    right_idx: int
+    left_low: float
+    head_low: float
+    right_low: float
+    neckline_left_idx: int
+    neckline_right_idx: int
+    neckline_left: float
+    neckline_right: float
+
+
+@dataclass
+class BullishPennantPattern:
+    upper_slope: float
+    upper_intercept: float
+    lower_slope: float
+    lower_intercept: float
+    offset: int
+    length: int
+
+
+@dataclass
+class BullishFlagPattern:
+    slope: float
+    intercept: float
+    upper_offset: float
+    lower_offset: float
+    offset: int
+    length: int
+
+
+@dataclass
+class BullishRectanglePattern:
+    high: float
+    low: float
+    offset: int
+    length: int
+    high_touch_indices: List[int]
+    low_touch_indices: List[int]
+
+
+@dataclass
+class RoundingBottomPattern:
+    coeffs: Sequence[float]
+    offset: int
+    length: int
+
+
+@dataclass
+class BreakawayGapPattern:
+    prev_close_idx: int
+    curr_open_idx: int
+    prev_close: float
+    curr_open: float
+    curr_close: float
 
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
@@ -184,201 +257,335 @@ def detect_double_bottom(
 
     return max(recent_hits, key=lambda hit: hit.bounce_pct)
 
-def detect_inverse_head_shoulders(df):
-    lows = df['low'].tail(60).values
-    highs = df['high'].tail(60).values
-    closes = df['close'].tail(60).values
-    indexes = np.arange(len(lows))
-    
-    # Find potential troughs (local minima)
+def _find_argmax(values: Sequence[float]) -> int:
+    max_idx = 0
+    max_val = values[0]
+    for idx, val in enumerate(values):
+        if val > max_val:
+            max_val = val
+            max_idx = idx
+    return max_idx
+
+
+def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
+    recent = df.tail(60)
+    lows = recent['low'].values
+    highs = recent['high'].values
+    closes = recent['close'].values
+
     troughs, _ = find_peaks(-lows, distance=5, prominence=0.5)
     if len(troughs) < 3:
-        return False
+        return None
+
+    offset = len(df) - len(recent)
 
     for i in range(len(troughs) - 2):
-        l_idx = troughs[i]
-        h_idx = troughs[i + 1]
-        r_idx = troughs[i + 2]
+        l_idx = int(troughs[i])
+        h_idx = int(troughs[i + 1])
+        r_idx = int(troughs[i + 2])
 
-        l = lows[l_idx]
-        h = lows[h_idx]
-        r = lows[r_idx]
+        l = float(lows[l_idx])
+        h = float(lows[h_idx])
+        r = float(lows[r_idx])
 
-        # Head must be lowest, shoulders similar height
         if not (h < l and h < r):
+            continue
+        if max(l, r) == 0:
             continue
         if abs(l - r) / max(l, r) > 0.1:
             continue
 
-        # Neckline from high between LS and head to high between head and RS
-        left_high = max(highs[l_idx:h_idx])
-        right_high = max(highs[h_idx:r_idx])
-        neckline = (left_high + right_high) / 2
+        left_high_segment = highs[l_idx:h_idx + 1]
+        right_high_segment = highs[h_idx:r_idx + 1]
+        if len(left_high_segment) == 0 or len(right_high_segment) == 0:
+            continue
 
-        # Breakout condition (optional)
-        if closes[-1] > neckline:
-            return True
+        left_high_rel = _find_argmax(left_high_segment)
+        right_high_rel = _find_argmax(right_high_segment)
 
-    return False
+        neckline_left_idx = offset + l_idx + left_high_rel
+        neckline_right_idx = offset + h_idx + right_high_rel
+        neckline_left = float(left_high_segment[left_high_rel])
+        neckline_right = float(right_high_segment[right_high_rel])
+        neckline_level = (neckline_left + neckline_right) / 2
 
-def detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2):
+        if closes[-1] > neckline_level:
+            return InverseHeadShouldersPattern(
+                left_idx=offset + l_idx,
+                head_idx=offset + h_idx,
+                right_idx=offset + r_idx,
+                left_low=l,
+                head_low=h,
+                right_low=r,
+                neckline_left_idx=neckline_left_idx,
+                neckline_right_idx=neckline_right_idx,
+                neckline_left=neckline_left,
+                neckline_right=neckline_right,
+            )
+
+    return None
+
+def detect_ascending_triangle(
+    df,
+    window=60,
+    tolerance=0.02,
+    min_touches=2,
+) -> Optional[AscendingTrianglePattern]:
     window = min(window, 60, len(df))
+    if window < min_touches + 2:
+        return None
 
-    highs = df['high'].tail(window).values
-    lows = df['low'].tail(window).values
-    closes = df['close'].tail(window).values
+    recent = df.tail(window)
+    highs = recent['high'].values
+    lows = recent['low'].values
+    closes = recent['close'].values
     x = np.arange(len(lows)).reshape(-1, 1)
 
     if len(highs) < min_touches + 2:
-        return False
+        return None
 
-    # Step 1: Identify flat resistance level using highs prior to the most recent candles
     plateau_end = len(highs) - 2 if len(highs) > 2 else len(highs)
     if plateau_end <= 0:
-        return False
+        return None
 
     plateau_span = min(20, plateau_end)
     plateau_start = plateau_end - plateau_span
     plateau_highs = highs[plateau_start:plateau_end]
 
     if plateau_highs.size == 0:
-        return False
+        return None
 
-    resistance = plateau_highs.max()
+    resistance = float(plateau_highs.max())
     if resistance == 0:
-        return False
+        return None
 
-    resistance_touches = [idx for idx in range(plateau_start, plateau_end)
-                          if abs(highs[idx] - resistance) / resistance < tolerance]
+    resistance_touches = [
+        idx
+        for idx in range(plateau_start, plateau_end)
+        if abs(highs[idx] - resistance) / resistance < tolerance
+    ]
 
     if len(resistance_touches) < min_touches:
-        return False
+        return None
 
-    # Step 2: Fit ascending trendline to lows
     lr = LinearRegression().fit(x, lows)
-    support_slope = lr.coef_[0]
+    support_slope = float(lr.coef_[0])
+    support_intercept = float(getattr(lr, "intercept_", lows.mean() - support_slope * (len(lows) / 2)))
     if support_slope <= 0:
-        return False
+        return None
 
-    # Step 3: Check how many points lie near the support trendline
     fitted_support = lr.predict(x)
-    support_touches = np.sum(np.abs(lows - fitted_support) / lows < tolerance)
-    
-    if support_touches < min_touches:
-        return False
+    support_touch_indices = [
+        idx
+        for idx, low in enumerate(lows)
+        if low != 0 and abs(low - fitted_support[idx]) / abs(low) < tolerance
+    ]
 
-    # Step 4 (optional): Check for breakout relative to the plateau resistance
-    breakout = (closes[-1] > resistance * (1 + tolerance)) or \
-               (highs[-1] > resistance * (1 + tolerance))
+    if len(support_touch_indices) < min_touches:
+        return None
 
-    return breakout or True  # Return True even if no breakout yet
+    breakout = (closes[-1] > resistance * (1 + tolerance)) or (
+        highs[-1] > resistance * (1 + tolerance)
+    )
+
+    offset = len(df) - len(recent)
+    return AscendingTrianglePattern(
+        resistance=resistance,
+        support_slope=support_slope,
+        support_intercept=support_intercept,
+        offset=offset,
+        length=len(recent),
+        resistance_indices=[offset + idx for idx in resistance_touches],
+        support_indices=[offset + idx for idx in support_touch_indices],
+        breakout=bool(breakout),
+    )
 
 
-def detect_bullish_pennant(df, window=60, flagpole_window=20, tolerance=0.03):
+def detect_bullish_pennant(
+    df,
+    window=60,
+    flagpole_window=20,
+    tolerance=0.03,
+) -> Optional[BullishPennantPattern]:
     if len(df) < window + flagpole_window:
-        return False
+        return None
 
-    # Step 1: Check flagpole strength
     flagpole = df.iloc[-(window + flagpole_window):-window]
+    if flagpole.empty:
+        return None
     pole_gain = flagpole['close'].iloc[-1] / flagpole['close'].iloc[0]
     if pole_gain < 1.2:
-        return False
+        return None
 
-    # Step 2: Analyze pennant body
     recent = df.tail(window)
     highs = recent['high'].values
     lows = recent['low'].values
     x = np.arange(len(highs)).reshape(-1, 1)
 
-    high_slope = LinearRegression().fit(x, highs).coef_[0]
-    low_slope = LinearRegression().fit(x, lows).coef_[0]
+    upper_model = LinearRegression().fit(x, highs)
+    lower_model = LinearRegression().fit(x, lows)
+    high_slope = float(upper_model.coef_[0])
+    low_slope = float(lower_model.coef_[0])
 
-    # Step 3: Confirm convergence
     if high_slope >= 0 or low_slope <= 0:
-        return False
+        return None
     if abs(high_slope - low_slope) < 0.01:
-        return False
+        return None
 
-    return True
+    offset = len(df) - len(recent)
+    return BullishPennantPattern(
+        upper_slope=high_slope,
+        upper_intercept=float(getattr(upper_model, "intercept_", highs.mean())),
+        lower_slope=low_slope,
+        lower_intercept=float(getattr(lower_model, "intercept_", lows.mean())),
+        offset=offset,
+        length=len(recent),
+    )
 
-def detect_bullish_flag(df, window=40, flagpole_window=20, slope_threshold=-0.1):
+
+def detect_bullish_flag(
+    df,
+    window=40,
+    flagpole_window=20,
+    slope_threshold=-0.1,
+) -> Optional[BullishFlagPattern]:
     if len(df) < window + flagpole_window:
-        return False
+        return None
 
     flagpole = df.iloc[-(window + flagpole_window):-window]
+    if flagpole.empty:
+        return None
     pole_gain = flagpole['close'].iloc[-1] / flagpole['close'].iloc[0]
     if pole_gain < 1.2:
-        return False
+        return None
 
     recent = df.tail(window)
     x = np.arange(len(recent)).reshape(-1, 1)
     y = recent['close'].values
     model = LinearRegression().fit(x, y)
-    slope = model.coef_[0]
+    slope = float(model.coef_[0])
 
-    return slope_threshold < slope < 0  # Channel should slope slightly downward
-def detect_bullish_rectangle(df, window=60, tolerance=0.02, min_touches=2):
+    if not (slope_threshold < slope < 0):
+        return None
+
+    fitted = model.predict(x)
+    upper_offset = float(np.max(recent['high'].values - fitted))
+    lower_offset = float(np.min(recent['low'].values - fitted))
+
+    offset = len(df) - len(recent)
+    return BullishFlagPattern(
+        slope=slope,
+        intercept=float(getattr(model, "intercept_", y.mean())),
+        upper_offset=upper_offset,
+        lower_offset=lower_offset,
+        offset=offset,
+        length=len(recent),
+    )
+
+
+def detect_bullish_rectangle(
+    df,
+    window=60,
+    tolerance=0.02,
+    min_touches=2,
+) -> Optional[BullishRectanglePattern]:
     if len(df) < window:
-        return False
+        return None
 
     recent = df.tail(window)
-    high = recent['high'].max()
-    low = recent['low'].min()
+    high = float(recent['high'].max())
+    low = float(recent['low'].min())
+    if high == 0 or low == 0:
+        return None
 
-    highs_touch = sum(abs(row - high) / high < tolerance for row in recent['high'])
-    lows_touch = sum(abs(row - low) / low < tolerance for row in recent['low'])
+    high_touch_indices = [
+        idx for idx, value in enumerate(recent['high'].values) if abs(value - high) / high < tolerance
+    ]
+    low_touch_indices = [
+        idx for idx, value in enumerate(recent['low'].values) if abs(value - low) / low < tolerance
+    ]
 
-    if highs_touch < min_touches or lows_touch < min_touches:
-        return False
+    if len(high_touch_indices) < min_touches or len(low_touch_indices) < min_touches:
+        return None
 
-    # Optional: Check breakout above resistance
-    if recent['close'].iloc[-1] > high * (1 + tolerance):
-        return True
+    offset = len(df) - len(recent)
+    return BullishRectanglePattern(
+        high=high,
+        low=low,
+        offset=offset,
+        length=len(recent),
+        high_touch_indices=[offset + idx for idx in high_touch_indices],
+        low_touch_indices=[offset + idx for idx in low_touch_indices],
+    )
 
-    return True
 
-def detect_rounding_bottom(df, window=100, tolerance=0.02):
+def detect_rounding_bottom(
+    df,
+    window=100,
+    tolerance=0.02,
+) -> Optional[RoundingBottomPattern]:
     if len(df) < window:
-        return False
+        return None
 
-    prices = df['close'].tail(window).values
-    x = np.arange(window)
+    recent = df.tail(window)
+    prices = recent['close'].values
+    if len(prices) < 3:
+        return None
+    x = np.arange(len(prices))
     poly = np.polyfit(x, prices, 2)
-    a = poly[0]
+    a = float(poly[0])
 
-    # Must be a U-shape (concave up)
     if a <= 0:
-        return False
+        return None
 
-    # Optional: check dip and recovery
     mid = window // 2
-    left = np.mean(prices[:mid//2])
-    bottom = np.min(prices)
-    right = np.mean(prices[-mid//2:])
+    left = np.mean(prices[: max(1, mid // 2)])
+    bottom = float(np.min(prices))
+    right = np.mean(prices[-max(1, mid // 2):])
 
-    # Require a dip and partial recovery
-    if (left - bottom) / left < 0.05 or (right - bottom) / right < 0.05:
-        return False
+    if left == 0 or right == 0:
+        return None
+    if (left - bottom) / left < tolerance or (right - bottom) / right < tolerance:
+        return None
 
-    return True
+    offset = len(df) - len(recent)
+    return RoundingBottomPattern(coeffs=poly, offset=offset, length=len(recent))
 
 
-def detect_breakaway_gap(df, gap_threshold=0.03, volume_multiplier=1.5):
+def detect_breakaway_gap(
+    df,
+    gap_threshold=0.03,
+    volume_multiplier=1.5,
+) -> Optional[BreakawayGapPattern]:
     if len(df) < 35:
-        return False
+        return None
 
-    prev_close = df['close'].iloc[-2]
-    curr_open = df['open'].iloc[-1]
-    curr_close = df['close'].iloc[-1]
+    prev_close = float(df['close'].iloc[-2])
+    curr_open = float(df['open'].iloc[-1])
+    curr_close = float(df['close'].iloc[-1])
     prev_vol = df['volume'].iloc[-31:-1].mean()
     curr_vol = df['volume'].iloc[-1]
+
+    if prev_close == 0:
+        return None
 
     gap = (curr_open - prev_close) / prev_close
     strong_gap = gap > gap_threshold
     volume_spike = curr_vol > prev_vol * volume_multiplier
-    full_gap_fill = curr_close > curr_open  # Strong close after open
+    full_gap_fill = curr_close > curr_open
 
-    return strong_gap and volume_spike and full_gap_fill
+    if strong_gap and volume_spike and full_gap_fill:
+        prev_close_idx = len(df) - 2
+        curr_open_idx = len(df) - 1
+        return BreakawayGapPattern(
+            prev_close_idx=prev_close_idx,
+            curr_open_idx=curr_open_idx,
+            prev_close=prev_close,
+            curr_open=curr_open,
+            curr_close=curr_close,
+        )
+
+    return None
 
 
 def volume_trend_up(df, window=60):
@@ -517,6 +724,7 @@ def scan_all_symbols(symbols):
                         f"Volume Contracted: {double_bottom_hit.volume_contracted}"
                     )
             else:
+                pattern = None
                 cup_handle_hit = detect_cup_and_handle(df)
                 if cup_handle_hit:
                     pattern = "Cup and Handle"
@@ -529,21 +737,25 @@ def scan_all_symbols(symbols):
                             f"Handle Pullback: {cup_handle_hit.handle_pullback_pct * 100:.1f}%, "
                             f"Handle Slope: {cup_handle_hit.handle_slope:.4f}"
                         )
-                elif detect_inverse_head_shoulders(df):
-                    pattern = "Inverse Head and Shoulders"
-                elif detect_ascending_triangle(df):
-                    pattern = "Ascending Triangle"
-                elif detect_bullish_pennant(df):
-                    pattern = "Bullish Pennant"
-                elif detect_bullish_flag(df):
-                    pattern = "Bullish Flag"
-                elif detect_bullish_rectangle(df):
-                    pattern = "Bullish Rectangle"
-                elif detect_rounding_bottom(df):
-                    pattern = "Rounding Bottom"
-                elif detect_breakaway_gap(df):
-                    pattern = "Breakaway Gap"
                 else:
+                    ihs = detect_inverse_head_shoulders(df)
+                    if ihs:
+                        pattern = "Inverse Head and Shoulders"
+                    else:
+                        if detect_ascending_triangle(df):
+                            pattern = "Ascending Triangle"
+                        elif detect_bullish_pennant(df):
+                            pattern = "Bullish Pennant"
+                        elif detect_bullish_flag(df):
+                            pattern = "Bullish Flag"
+                        elif detect_bullish_rectangle(df):
+                            pattern = "Bullish Rectangle"
+                        elif detect_rounding_bottom(df):
+                            pattern = "Rounding Bottom"
+                        elif detect_breakaway_gap(df):
+                            pattern = "Breakaway Gap"
+
+                if not pattern:
                     print(" Skipped: No pattern matched")
                     disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
                     continue
