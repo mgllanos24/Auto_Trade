@@ -5,13 +5,14 @@ import os
 import csv
 import time
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
@@ -114,6 +115,16 @@ class BreakawayGapPattern:
     curr_open: float
     curr_close: float
 
+
+@dataclass
+class PrecomputedIndicators:
+    entry: float
+    ma50: Optional[float]
+    ma200: Optional[float]
+    price_slope: Optional[float]
+    volume_slope: Optional[float]
+    recent_high_20: Optional[float]
+
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
     'EMB', 'EMXC', 'ESGE', 'ETHA', 'TLT', 'EUFN', 'FDNI', 'TQQQ', 'QQQ', 'QQQM', 'QYLD', 'TSDD',
@@ -125,6 +136,42 @@ def flatten_yf_columns(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
     return df
+
+
+def compute_precomputed_indicators(df: pd.DataFrame) -> PrecomputedIndicators:
+    entry = float(df['close'].iloc[-1]) if not df.empty else float('nan')
+
+    closes = df['close']
+    ma50 = closes.rolling(50).mean().iloc[-1] if len(closes) >= 50 else None
+    ma200 = closes.rolling(200).mean().iloc[-1] if len(closes) >= 200 else None
+
+    price_tail = closes.tail(90)
+    if len(price_tail) >= 2:
+        x_price = np.arange(len(price_tail)).reshape(-1, 1)
+        price_slope = LinearRegression().fit(x_price, price_tail).coef_[0]
+    else:
+        price_slope = None
+
+    volume_tail = df['volume'].tail(60)
+    if len(volume_tail) >= 2:
+        x_vol = np.arange(len(volume_tail)).reshape(-1, 1)
+        volume_slope = LinearRegression().fit(x_vol, volume_tail).coef_[0]
+    else:
+        volume_slope = None
+
+    if len(df) >= 21:
+        recent_high_20 = df['high'].rolling(20).max().shift(1).iloc[-1]
+    else:
+        recent_high_20 = None
+
+    return PrecomputedIndicators(
+        entry=entry,
+        ma50=ma50,
+        ma200=ma200,
+        price_slope=price_slope,
+        volume_slope=volume_slope,
+        recent_high_20=recent_high_20,
+    )
 
 def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
     if not hits:
@@ -147,6 +194,26 @@ def get_yf_data(symbol):
         return df[['open', 'high', 'low', 'close', 'volume']]
     except Exception:
         return pd.DataFrame()
+
+
+def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str, pd.DataFrame]:
+    results: Dict[str, pd.DataFrame] = {}
+    if not symbols:
+        return results
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_symbol = {
+            executor.submit(get_yf_data, symbol): symbol for symbol in symbols
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                results[symbol] = future.result()
+            except Exception as exc:
+                print(f" Error fetching {symbol}: {exc}")
+                results[symbol] = pd.DataFrame()
+
+    return results
 
 def anchored_vwap(df, anchor_index):
     cum_vol = df['volume'][anchor_index:].cumsum()
@@ -190,15 +257,25 @@ def holds_monthly_breakout(df):
     one_month_high = df['high'].rolling(window=21).max().shift(1).iloc[-1]
     return df['close'].iloc[-1] > one_month_high
 
-def is_uptrend(df):
+def is_uptrend(df, indicators: Optional[PrecomputedIndicators] = None):
     if len(df) < 200:
         print(f" Not enough data for trend check: {len(df)} rows")
         return False
-    ma50 = df['close'].rolling(50).mean().iloc[-1]
-    ma200 = df['close'].rolling(200).mean().iloc[-1]
-    recent = df['close'].tail(90).values
-    X = np.arange(len(recent)).reshape(-1, 1)
-    slope = LinearRegression().fit(X, recent).coef_[0]
+    if indicators and indicators.ma50 is not None:
+        ma50 = indicators.ma50
+    else:
+        ma50 = df['close'].rolling(50).mean().iloc[-1]
+    if indicators and indicators.ma200 is not None:
+        ma200 = indicators.ma200
+    else:
+        ma200 = df['close'].rolling(200).mean().iloc[-1]
+
+    if indicators and indicators.price_slope is not None:
+        slope = indicators.price_slope
+    else:
+        recent = df['close'].tail(90).values
+        X = np.arange(len(recent)).reshape(-1, 1)
+        slope = LinearRegression().fit(X, recent).coef_[0]
 
     swing_idx = detect_swing_low(df)
     vwap_series = anchored_vwap(df, swing_idx)
@@ -608,19 +685,29 @@ def detect_breakaway_gap(
     return None
 
 
-def volume_trend_up(df, window=60):
+def volume_trend_up(df, window=60, slope: Optional[float] = None):
     if len(df) < window:
         return False
-    vol = df['volume'].tail(window).values
-    x = np.arange(len(vol)).reshape(-1, 1)
-    model = LinearRegression().fit(x, vol)
-    slope = model.coef_[0]
+    if slope is None:
+        vol = df['volume'].tail(window).values
+        x = np.arange(len(vol)).reshape(-1, 1)
+        model = LinearRegression().fit(x, vol)
+        slope = model.coef_[0]
     print(f" Volume slope: {slope:.2f}")
     return slope > 0
 
-def is_near_breakout(df, tolerance=0.03):
-    recent_high = df['high'].rolling(20).max().iloc[-2]
-    last_close = df['close'].iloc[-1]
+def is_near_breakout(
+    df,
+    tolerance=0.03,
+    recent_high: Optional[float] = None,
+    last_close: Optional[float] = None,
+):
+    if recent_high is None:
+        recent_high = df['high'].rolling(20).max().iloc[-2]
+    if last_close is None:
+        last_close = df['close'].iloc[-1]
+    if not recent_high:
+        return False
     return abs(last_close - recent_high) / recent_high <= tolerance
 
 def calculate_rr_price_action(df, entry_price):
@@ -708,14 +795,40 @@ def _demo_ascending_triangle_detection():
 def scan_all_symbols(symbols):
     initialize_watchlist()
     disqualified = []
+
+    symbols_to_fetch = [s for s in symbols if s.upper() not in EXCLUDED_ETFS]
+    data_by_symbol = fetch_symbol_data(symbols_to_fetch)
+
     for symbol in symbols:
         print(f"\n Scanning {symbol}...")
         if symbol.upper() in EXCLUDED_ETFS:
             print(" Skipped: Excluded ETF")
             continue
+
         try:
-            df = get_yf_data(symbol)
-            entry = df['close'].iloc[-1]
+            df = data_by_symbol.get(symbol, pd.DataFrame())
+            if df.empty:
+                print(" Skipped: Bad or insufficient data")
+                disqualified.append({'symbol': symbol, 'reason': 'bad data', 'entry': None, 'rr': None})
+                continue
+
+            indicators = compute_precomputed_indicators(df)
+            entry = indicators.entry
+
+            if not is_uptrend(df, indicators):
+                print(" Skipped: Uptrend not confirmed")
+                disqualified.append({'symbol': symbol, 'reason': 'not in uptrend', 'entry': entry, 'rr': None})
+                continue
+
+            if not volume_trend_up(df, slope=indicators.volume_slope):
+                print(" Skipped: Volume trend is not increasing")
+                disqualified.append({'symbol': symbol, 'reason': 'volume not picking up', 'entry': entry, 'rr': None})
+                continue
+
+            if not is_near_breakout(df, recent_high=indicators.recent_high_20, last_close=entry):
+                print(" Skipped: Not near breakout")
+                disqualified.append({'symbol': symbol, 'reason': 'not near breakout', 'entry': entry, 'rr': None})
+                continue
 
             swing_candidate = evaluate_swing_setup(symbol, df, SWING_CONFIG)
             if isinstance(swing_candidate, SwingCandidate):
@@ -779,26 +892,6 @@ def scan_all_symbols(symbols):
                     print(" Skipped: No pattern matched")
                     disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
                     continue
-
-            if df.empty:
-                print(" Skipped: Bad or insufficient data")
-                disqualified.append({'symbol': symbol, 'reason': 'bad data', 'entry': None, 'rr': None})
-                continue
-
-            if not is_uptrend(df):
-                print(" Skipped: Uptrend not confirmed")
-                disqualified.append({'symbol': symbol, 'reason': 'not in uptrend', 'entry': None, 'rr': None})
-                continue
-
-            if not volume_trend_up(df):
-                print(" Skipped: Volume trend is not increasing")
-                disqualified.append({'symbol': symbol, 'reason': 'volume not picking up', 'entry': None, 'rr': None})
-                continue
-
-            if not is_near_breakout(df):
-                print(" Skipped: Not near breakout")
-                disqualified.append({'symbol': symbol, 'reason': 'not near breakout', 'entry': None, 'rr': None})
-                continue
 
             stop, target, rr = calculate_rr_price_action(df, entry)
             if rr is None or rr > 0.8:
