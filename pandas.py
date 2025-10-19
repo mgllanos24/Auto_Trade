@@ -135,6 +135,17 @@ class Series:
     def empty(self) -> bool:
         return len(self._data) == 0
 
+    @property
+    def values(self):
+        """Return the underlying data as a NumPy array."""
+
+        def _is_numeric(value: object) -> bool:
+            return isinstance(value, (int, float)) or _is_nan(value)
+
+        if all(_is_numeric(value) for value in self._data):
+            return np.array([_to_float(value) for value in self._data], dtype=float)
+        return np.array(self._data, dtype=object)
+
     # ------------------------------------------------------------------
     # Arithmetic helpers
     # ------------------------------------------------------------------
@@ -402,6 +413,20 @@ class DataFrame:
         if isinstance(key, list):
             return DataFrame({name: self._data[name]._data for name in key}, index=self.index[:])
         return self._data[key].copy()
+
+    @property
+    def values(self):
+        """Return the frame data as a 2D NumPy array."""
+        if not self._data:
+            return np.empty((0, 0))
+        columns = self.columns
+        data = []
+        for row_idx in range(len(self.index)):
+            data.append([self._data[col]._data[row_idx] for col in columns])
+        try:
+            return np.array(data, dtype=float)
+        except (TypeError, ValueError):
+            return np.array(data, dtype=object)
 
     def iterrows(self):
         column_names = self.columns
