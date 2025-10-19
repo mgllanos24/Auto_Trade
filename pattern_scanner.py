@@ -160,7 +160,29 @@ def detect_double_bottom(
     )
     if not hits:
         return False
-    return max(hits, key=lambda hit: hit.bounce_pct)
+
+    total_rows = len(df)
+    recent_threshold = max(5, window // 4)
+
+    recent_hits = [
+        hit
+        for hit in hits
+        if getattr(hit, "breakout_idx", None) is not None
+        and total_rows - hit.breakout_idx <= recent_threshold
+    ]
+
+    if not recent_hits:
+        recent_hits = [
+            hit
+            for hit in hits
+            if getattr(hit, "right_idx", None) is not None
+            and total_rows - hit.right_idx <= recent_threshold
+        ]
+
+    if not recent_hits:
+        return False
+
+    return max(recent_hits, key=lambda hit: hit.bounce_pct)
 
 def detect_inverse_head_shoulders(df):
     lows = df['low'].tail(60).values
