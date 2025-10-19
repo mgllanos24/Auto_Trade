@@ -423,6 +423,8 @@ def run_scan():
             global is_scanning
             scan_status_var.set(status)
             scan_button.config(state="normal")
+            if status == "Completed":
+                load_watchlist()
             is_scanning = False
 
         root.after(0, finalize)
