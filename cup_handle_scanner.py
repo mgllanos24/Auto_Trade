@@ -6,7 +6,21 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
+from typing import Iterable
+
+
+def _linear_regression_slope(x: Iterable[float], y: Iterable[float]) -> float:
+    x_vals = [float(val) for val in x]
+    y_vals = [float(val) for val in y]
+    if not x_vals or len(x_vals) != len(y_vals):
+        return 0.0
+    x_mean = float(np.mean(x_vals))
+    y_mean = float(np.mean(y_vals))
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, y_vals))
+    denominator = sum((x - x_mean) ** 2 for x in x_vals)
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
 
 
 @dataclass
@@ -94,9 +108,8 @@ def detect_cup_and_handle(
     if cup_depth_pct < min_cup_depth_pct:
         return None
 
-    x = np.arange(handle_window).reshape(-1, 1)
-    model = LinearRegression().fit(x, handle.to_numpy())
-    handle_slope = float(model.coef_[0])
+    x = range(handle_window)
+    handle_slope = float(_linear_regression_slope(x, handle))
 
     slope_low, slope_high = handle_slope_bounds
     if not (slope_low <= handle_slope <= slope_high):
