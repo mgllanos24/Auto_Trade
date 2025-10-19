@@ -25,7 +25,7 @@ import time
 import threading
 import signal
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -73,7 +73,7 @@ root.geometry("1400x900")
 
 symbol_data = {}
 _long_name_cache = {}
-_institution_activity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_institution_activity_cache: dict[str, dict[str, Any]] = {}
 INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
@@ -118,32 +118,114 @@ def _normalise_report_date(raw: Any) -> str:
     return str(raw)
 
 
-def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str]]:
+def _parse_report_datetime(raw: Any) -> Optional[datetime]:
+    if raw in (None, "", "N/A"):
+        return None
+
+    if isinstance(raw, (int, float)):
+        for divisor in (1, 1000):
+            try:
+                parsed = datetime.fromtimestamp(raw / divisor)
+            except (OverflowError, OSError, ValueError):
+                continue
+            else:
+                if parsed.year >= 1970:
+                    return parsed
+        return None
+
+    try:
+        parsed = pd.to_datetime(raw, errors="coerce")
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    if pd.isna(parsed):
+        return None
+
+    if hasattr(parsed, "to_pydatetime"):
+        return parsed.to_pydatetime()
+
+    return None
+
+
+def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str], str]:
     now = time.time()
-    cached = _institution_activity_cache.get(symbol)
-    if cached and now - cached[0] < INSTITUTION_CACHE_TTL:
-        return cached[1], None
+    cached_payload = _institution_activity_cache.get(symbol) or {}
+
+    if isinstance(cached_payload, tuple) and len(cached_payload) == 2:
+        cached_payload = {
+            "timestamp": cached_payload[0],
+            "data_timestamp": cached_payload[0],
+            "entries": cached_payload[1],
+            "message": None,
+            "level": "info",
+        }
+
+    cached_timestamp = cached_payload.get("timestamp")
+    cached_entries = cached_payload.get("entries", [])
+    cached_message = cached_payload.get("message")
+    cached_level = cached_payload.get("level", "info")
+    data_timestamp = cached_payload.get("data_timestamp", cached_timestamp)
+
+    if cached_timestamp is not None and now - cached_timestamp < INSTITUTION_CACHE_TTL:
+        return cached_entries, cached_message, cached_level
 
     url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=institutionOwnership"
+
+    def _cache_and_return(
+        entries: list[dict[str, Any]],
+        message: Optional[str],
+        level: str,
+        *,
+        timestamp: float,
+        data_ts: Optional[float] = None,
+    ) -> tuple[list[dict[str, Any]], Optional[str], str]:
+        payload = {
+            "timestamp": timestamp,
+            "data_timestamp": data_ts if data_ts is not None else timestamp,
+            "entries": entries,
+            "message": message,
+            "level": level,
+        }
+        _institution_activity_cache[symbol] = payload
+        return entries, message, level
+
+    def _format_cached_timestamp(ts: Optional[float]) -> str:
+        if not ts:
+            return "previously"
+        try:
+            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
+        except (OverflowError, OSError, ValueError):
+            return "previously"
+
     try:
         with urlopen(url, timeout=10) as response:
             payload = json.load(response)
     except URLError as exc:
         reason = getattr(exc, "reason", exc)
-        return [], f"Unable to load institutional activity ({reason})."
+        if cached_entries:
+            message = (
+                f"Showing cached institutional activity from {_format_cached_timestamp(data_timestamp)} "
+                f"because the latest request failed: {reason}."
+            )
+            return _cache_and_return(cached_entries, message, "warning", timestamp=now, data_ts=data_timestamp)
+        return [], f"Unable to load institutional activity ({reason}).", "error"
     except Exception as exc:  # pragma: no cover - defensive
-        return [], f"Unable to load institutional activity ({exc})."
+        if cached_entries:
+            message = (
+                f"Showing cached institutional activity from {_format_cached_timestamp(data_timestamp)} "
+                f"because the latest request failed: {exc}."
+            )
+            return _cache_and_return(cached_entries, message, "warning", timestamp=now, data_ts=data_timestamp)
+        return [], f"Unable to load institutional activity ({exc}).", "error"
 
     try:
         results = payload.get("quoteSummary", {}).get("result", [])
         if not results:
-            _institution_activity_cache[symbol] = (now, [])
-            return [], None
+            return _cache_and_return([], None, "info", timestamp=now)
         ownership = results[0].get("institutionOwnership", {})
         raw_entries = ownership.get("ownershipList", [])
     except AttributeError:
-        _institution_activity_cache[symbol] = (now, [])
-        return [], None
+        return _cache_and_return([], None, "info", timestamp=now)
 
     parsed_entries: list[dict[str, Any]] = []
     for entry in raw_entries:
@@ -153,6 +235,7 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
         purchased = entry.get("purchased")
         sold = entry.get("soldOut")
         organization = entry.get("organization") or "Unknown"
+        report_datetime = _parse_report_datetime(entry.get("reportDate"))
         parsed_entries.append(
             {
                 "organization": organization,
@@ -160,12 +243,17 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
                 "purchased": purchased if purchased is not None else 0,
                 "sold": sold if sold is not None else 0,
                 "report_date": _normalise_report_date(entry.get("reportDate")),
+                "report_datetime": report_datetime,
             }
         )
 
     parsed_entries.sort(key=lambda item: abs(item.get("net_activity", 0)), reverse=True)
-    _institution_activity_cache[symbol] = (now, parsed_entries)
-    return parsed_entries, None
+    cutoff = datetime.utcnow() - timedelta(days=182)
+    recent_entries = [
+        entry for entry in parsed_entries if entry.get("report_datetime") and entry["report_datetime"] >= cutoff
+    ]
+
+    return _cache_and_return(recent_entries, None, "info", timestamp=now)
 
 
 def _detect_with_trimming(
@@ -443,7 +531,7 @@ def show_candlestick():
     for w in chart_frame.winfo_children():
         w.destroy()
 
-    activity_entries, activity_error = fetch_institution_activity(sym)
+    activity_entries, activity_message, activity_level = fetch_institution_activity(sym)
 
     info_panel = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
     info_panel.pack(side="left", fill="y", padx=(0, 10), pady=5)
@@ -459,88 +547,107 @@ def show_candlestick():
 
     content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
 
-    if activity_error:
+    if activity_message:
+        color_map = {"error": "red", "warning": "#c27d00", "info": "#333333"}
         tk.Label(
             info_panel,
-            text=activity_error,
+            text=activity_message,
             justify="left",
             wraplength=240,
-            fg="red",
+            fg=color_map.get(activity_level, "#333333"),
             bg="#f5f5f5",
             anchor="w",
         ).pack(fill="x", padx=4, pady=6)
-    elif not activity_entries:
-        tk.Label(
-            info_panel,
-            text="No recent institutional accumulation or selling reported.",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=6)
-    else:
+
+    if activity_entries:
         total_net = sum(entry.get("net_activity", 0) or 0 for entry in activity_entries)
         net_color = "green" if total_net > 0 else "red" if total_net < 0 else "#555555"
         tk.Label(
             info_panel,
-            text=f"Net activity: {_format_share_amount(total_net)} shares",
+            text=f"Net activity (6M): {_format_share_amount(total_net)} shares",
             fg=net_color,
             bg="#f5f5f5",
             anchor="w",
         ).pack(fill="x", padx=4, pady=(6, 2))
 
-        for entry in activity_entries[:6]:
-            frame = tk.Frame(info_panel, bg="#f5f5f5")
-            frame.pack(fill="x", padx=2, pady=(4, 0))
+        top_accumulators = sorted(
+            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) > 0),
+            key=lambda entry: entry.get("net_activity", 0) or 0,
+            reverse=True,
+        )[:3]
+        top_sellers = sorted(
+            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) < 0),
+            key=lambda entry: entry.get("net_activity", 0) or 0,
+        )[:3]
 
+        if not top_accumulators and not top_sellers:
             tk.Label(
-                frame,
-                text=entry.get("organization", "Unknown"),
-                font=("Arial", 10, "bold"),
-                bg="#f5f5f5",
-                anchor="w",
+                info_panel,
+                text="No institutional accumulation or selling in the past 6 months.",
                 justify="left",
                 wraplength=240,
-            ).pack(fill="x")
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=6)
 
-            net_value = entry.get("net_activity", 0) or 0
-            if net_value > 0:
-                action_text = "Accumulated"
-                action_color = "green"
-                net_display = _format_share_amount(net_value)
-            elif net_value < 0:
-                action_text = "Sold"
-                action_color = "red"
+        def _render_section(title: str, entries: list[dict[str, Any]], positive: bool) -> None:
+            if not entries:
+                return
+
+            tk.Label(
+                info_panel,
+                text=title,
+                font=("Arial", 11, "bold"),
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=(8, 2))
+
+            for entry in entries:
+                frame = tk.Frame(info_panel, bg="#f5f5f5")
+                frame.pack(fill="x", padx=2, pady=(4, 0))
+
+                tk.Label(
+                    frame,
+                    text=entry.get("organization", "Unknown"),
+                    font=("Arial", 10, "bold"),
+                    bg="#f5f5f5",
+                    anchor="w",
+                    justify="left",
+                    wraplength=240,
+                ).pack(fill="x")
+
+                net_value = entry.get("net_activity", 0) or 0
+                action_color = "green" if positive else "red"
                 net_display = _format_share_amount(abs(net_value))
-            else:
-                action_text = "No net change"
-                action_color = "#555555"
-                net_display = "0"
+                action_text = "Accumulated" if positive else "Sold"
 
-            tk.Label(
-                frame,
-                text=f"{action_text}: {net_display} shares",
-                fg=action_color,
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+                tk.Label(
+                    frame,
+                    text=f"{action_text}: {net_display} shares",
+                    fg=action_color,
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
 
-            purchased = entry.get("purchased", 0) or 0
-            sold = entry.get("sold", 0) or 0
-            tk.Label(
-                frame,
-                text=f"Bought: {_format_share_amount(purchased)} | Sold: {_format_share_amount(sold)}",
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+                tk.Label(
+                    frame,
+                    text=f"Report: {entry.get('report_date', 'N/A')}",
+                    fg="#666666",
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
 
-            tk.Label(
-                frame,
-                text=f"Report: {entry.get('report_date', 'N/A')}",
-                fg="#666666",
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(**content_pad)
+        _render_section("Top accumulators (6M)", top_accumulators, True)
+        _render_section("Top sellers (6M)", top_sellers, False)
+    else:
+        tk.Label(
+            info_panel,
+            text="No institutional accumulation or selling reported in the past 6 months.",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(fill="x", padx=4, pady=6)
 
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
