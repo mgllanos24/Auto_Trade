@@ -267,6 +267,31 @@ def _find_argmax(values: Sequence[float]) -> int:
     return max_idx
 
 
+def _shoulder_has_width(
+    lows: Sequence[float],
+    idx: int,
+    window: int = 2,
+    tolerance: float = 0.005,
+) -> bool:
+    """Ensure the shoulder trough spans multiple candles.
+
+    A valid shoulder should have at least one neighbouring candle with a low
+    close to the trough low. This helps avoid flagging one-candle shoulders.
+    """
+
+    start = max(0, idx - window)
+    end = min(len(lows), idx + window + 1)
+    if end - start <= 1:
+        return False
+
+    shoulder_low = lows[idx]
+    proximity = shoulder_low * tolerance
+    similar_candles = sum(
+        1 for value in lows[start:end] if abs(value - shoulder_low) <= proximity
+    )
+    return similar_candles >= 2
+
+
 def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
     recent = df.tail(60)
     lows = recent['low'].values
@@ -300,6 +325,8 @@ def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
         if max(l, r) == 0:
             continue
         if abs(l - r) / max(l, r) > 0.1:
+            continue
+        if not (_shoulder_has_width(lows, l_idx) and _shoulder_has_width(lows, r_idx)):
             continue
 
         left_high_segment = highs[l_idx:h_idx + 1]
