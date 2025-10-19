@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import sys
+import traceback
 from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import csv
@@ -61,6 +63,47 @@ class Index(list):  # pragma: no cover - simple container
 
     def copy(self) -> "Index":
         return Index(self, name=self.name)
+
+    def __getattr__(self, attr):
+        if attr == "tz":
+            preview = list(self[:5])
+            inspected = list(self[: min(len(self), 20)])
+            naive_datetimes = 0
+            aware_datetimes = 0
+            non_datetime_values = 0
+            tz_labels = []
+            for value in inspected:
+                if isinstance(value, _dt.datetime):
+                    if value.tzinfo is None:
+                        naive_datetimes += 1
+                        tz_labels.append("naive")
+                    else:
+                        aware_datetimes += 1
+                        tzinfo = value.tzinfo
+                        tz_name = getattr(tzinfo, "zone", None) or getattr(
+                            tzinfo, "key", None
+                        )
+                        if tz_name is None:
+                            try:
+                                tz_name = tzinfo.tzname(value)
+                            except Exception:  # pragma: no cover - diagnostic only
+                                tz_name = repr(tzinfo)
+                        tz_labels.append(str(tz_name))
+                else:
+                    non_datetime_values += 1
+                    tz_labels.append(type(value).__name__)
+            stack = "".join(traceback.format_stack(limit=8))
+            print(
+                "[pandas.Index DEBUG] Attempted access to missing 'tz' attribute",
+                f"(name={self.name!r}, size={len(self)}, sample={preview})",
+                f"tz-inspection={{naive:{naive_datetimes}, aware:{aware_datetimes}, non-datetime:{non_datetime_values}, inspected:{len(inspected)}}}",
+                f"tz-labels={tz_labels}",
+                "\n",
+                stack,
+                sep=" ",
+                file=sys.stderr,
+            )
+        raise AttributeError(f"'Index' object has no attribute '{attr}'")
 
 
 class RangeIndex(Index):  # pragma: no cover - simple container
@@ -179,10 +222,21 @@ class Series:
     def __init__(self, data: Iterable[object], index: Sequence[object] | None = None, name: str | None = None):
         self._data: List[object] = list(data)
         if index is None:
-            self.index: Index = _ensure_index(range(len(self._data)))
+            self.index = range(len(self._data))
         else:
-            self.index = _ensure_index(index)
+            self.index = index
         self.name = name
+
+    @property
+    def index(self) -> Index:
+        return self._index
+
+    @index.setter
+    def index(self, new_index) -> None:
+        ensured = _ensure_index(new_index)
+        if len(ensured) != len(self._data):
+            raise ValueError("Index length does not match data length")
+        self._index = ensured
 
     # ------------------------------------------------------------------
     # Container protocol
@@ -440,7 +494,7 @@ class DataFrame:
     def __init__(self, data: Mapping[str, Iterable[object]], index: Sequence[object] | None = None):
         if not data:
             self._data: Dict[str, Series] = {}
-            self.index: Index = _ensure_index(index or [])
+            self.index = index or []
             self._columns_name: str | None = None
             return
 
@@ -456,7 +510,7 @@ class DataFrame:
         if inferred_length is None:
             inferred_length = len(index) if index is not None else 0
         if index is None:
-            self.index = _ensure_index(range(inferred_length))
+            self.index = range(inferred_length)
         else:
             ensured_index = _ensure_index(index)
             if len(ensured_index) != inferred_length:
@@ -476,6 +530,14 @@ class DataFrame:
             for name, values in data.items()
         }
         self._columns_name: str | None = None
+
+    @property
+    def index(self) -> Index:
+        return self._index
+
+    @index.setter
+    def index(self, new_index) -> None:
+        self._index = _ensure_index(new_index)
 
     # ------------------------------------------------------------------
     # Container protocol
