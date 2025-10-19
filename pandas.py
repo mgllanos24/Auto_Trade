@@ -82,7 +82,27 @@ def _ensure_index(values: Sequence[object] | Index, *, name: str | None = None) 
 
 
 class _TimestampFactory:
-    def __call__(self, value=None):
+    _UNIT_MULTIPLIERS = {
+        "s": 1,
+        "ms": 1e-3,
+        "us": 1e-6,
+        "ns": 1e-9,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+    }
+
+    def __call__(self, value=None, *, unit: str | None = None):
+        if unit is not None:
+            if unit not in self._UNIT_MULTIPLIERS:
+                raise ValueError(f"Unsupported unit '{unit}'")
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                scaled_value = value
+            else:
+                scaled_value = numeric_value * self._UNIT_MULTIPLIERS[unit]
+            value = scaled_value
         if value is None:
             return self.now()
         if isinstance(value, _dt.datetime):
@@ -421,6 +441,7 @@ class DataFrame:
         if not data:
             self._data: Dict[str, Series] = {}
             self.index: Index = _ensure_index(index or [])
+            self._columns_name: str | None = None
             return
 
         inferred_length = None
@@ -454,6 +475,7 @@ class DataFrame:
             name: Series(_ensure_list(values), index=self.index, name=name)
             for name, values in data.items()
         }
+        self._columns_name: str | None = None
 
     # ------------------------------------------------------------------
     # Container protocol
@@ -462,12 +484,26 @@ class DataFrame:
         return len(self.index)
 
     @property
-    def columns(self) -> List[str]:
-        return list(self._data.keys())
+    def columns(self) -> Index:
+        return Index(self._data.keys(), name=self._columns_name)
+
+    @columns.setter
+    def columns(self, new_columns) -> None:
+        ensured = _ensure_index(new_columns)
+        if len(ensured) != len(self._data):
+            raise ValueError("Length mismatch when setting columns")
+        existing_series = list(self._data.values())
+        renamed: Dict[str, Series] = {}
+        for name, series in zip(ensured, existing_series):
+            renamed[name] = Series(series._data[:], index=self.index[:], name=name)
+        self._data = renamed
+        self._columns_name = ensured.name
 
     def __getitem__(self, key):
         if isinstance(key, list):
-            return DataFrame({name: self._data[name]._data for name in key}, index=self.index[:])
+            frame = DataFrame({name: self._data[name]._data for name in key}, index=self.index[:])
+            frame._columns_name = self._columns_name
+            return frame
         return self._data[key].copy()
 
     @property
@@ -475,7 +511,7 @@ class DataFrame:
         """Return the frame data as a 2D NumPy array."""
         if not self._data:
             return np.empty((0, 0))
-        columns = self.columns
+        columns = list(self.columns)
         data = []
         for row_idx in range(len(self.index)):
             data.append([self._data[col]._data[row_idx] for col in columns])
@@ -485,7 +521,7 @@ class DataFrame:
             return np.array(data, dtype=object)
 
     def iterrows(self):
-        column_names = self.columns
+        column_names = list(self.columns)
         for position, label in enumerate(self.index):
             values = [self._data[name]._data[position] for name in column_names]
             yield label, Series(values, index=column_names, name=label)
@@ -508,13 +544,19 @@ class DataFrame:
         return len(self.index) == 0
 
     def copy(self) -> "DataFrame":
-        return DataFrame({name: series._data[:] for name, series in self._data.items()}, index=self.index[:])
+        frame = DataFrame({name: series._data[:] for name, series in self._data.items()}, index=self.index[:])
+        frame._columns_name = self._columns_name
+        return frame
 
     def tail(self, n: int) -> "DataFrame":
         if n <= 0:
-            return DataFrame({}, index=[])
+            frame = DataFrame({}, index=[])
+            frame._columns_name = self._columns_name
+            return frame
         start = max(0, len(self.index) - n)
-        return self.iloc[start:]
+        result = self.iloc[start:]
+        result._columns_name = self._columns_name
+        return result
 
     # ------------------------------------------------------------------
     # Mutating helpers used in the project code
@@ -549,7 +591,9 @@ class DataFrame:
                 self._data[name] = Series(values, index=self.index[:], name=name)
             return None
 
-        return DataFrame(new_columns, index=new_index)
+        frame = DataFrame(new_columns, index=new_index)
+        frame._columns_name = self._columns_name
+        return frame
 
     def rename(self, *, columns: Mapping[str, str] | None = None, inplace: bool = False):
         if not columns:
@@ -560,8 +604,11 @@ class DataFrame:
             mapped[new_name] = Series(series._data[:], index=self.index[:], name=new_name)
         if inplace:
             self._data = mapped
+            self._columns_name = self._columns_name
             return self
-        return DataFrame({name: series._data[:] for name, series in mapped.items()}, index=self.index[:])
+        frame = DataFrame({name: series._data[:] for name, series in mapped.items()}, index=self.index[:])
+        frame._columns_name = self._columns_name
+        return frame
 
     def set_index(self, column: str, inplace: bool = False):
         if column not in self._data:
@@ -572,10 +619,14 @@ class DataFrame:
             self.index = _ensure_index(new_index)
             self._data = {name: Series(values, index=self.index[:], name=name) for name, values in remaining.items()}
             return self
-        return DataFrame(remaining, index=list(new_index))
+        frame = DataFrame(remaining, index=list(new_index))
+        frame._columns_name = self._columns_name
+        return frame
 
     def isnull(self) -> "DataFrame":
-        return DataFrame({name: series.isnull()._data for name, series in self._data.items()}, index=self.index[:])
+        frame = DataFrame({name: series.isnull()._data for name, series in self._data.items()}, index=self.index[:])
+        frame._columns_name = self._columns_name
+        return frame
 
     def any(self) -> Series:
         data = [self._data[name].any() for name in self.columns]
@@ -589,8 +640,9 @@ class DataFrame:
                 finite = [float(v) for v in values if not _is_nan(v)]
                 rows.append(max(finite) if finite else float("nan"))
             return Series(rows, index=self.index[:], name=None)
-        data = [self._data[col].max() for col in self.columns]
-        return Series(data, index=self.columns, name=None)
+        column_index = self.columns
+        data = [self._data[col].max() for col in column_index]
+        return Series(data, index=column_index, name=None)
 
     @property
     def iloc(self):
@@ -606,7 +658,9 @@ class _DataFrameILoc:
             start, stop, step = key.indices(len(self._frame.index))
             new_index = _ensure_index([self._frame.index[i] for i in range(start, stop, step)], name=self._frame.index.name)
             data = {name: [series._data[i] for i in range(start, stop, step)] for name, series in self._frame._data.items()}
-            return DataFrame(data, index=new_index)
+            frame = DataFrame(data, index=new_index)
+            frame._columns_name = self._frame._columns_name
+            return frame
         raise TypeError("Only slicing is supported in iloc")
 
 
@@ -627,7 +681,12 @@ def concat(objs: Sequence[Series | DataFrame], axis: int = 0) -> DataFrame:
                 data[name] = obj._data[name]._data[:]
         else:  # pragma: no cover - unused
             raise TypeError("Unsupported object for concat")
-    return DataFrame(data, index=index)
+    frame = DataFrame(data, index=index)
+    if isinstance(first, DataFrame):
+        frame._columns_name = first._columns_name
+    else:
+        frame._columns_name = None
+    return frame
 
 
 @classmethod
