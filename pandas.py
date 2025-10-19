@@ -519,6 +519,38 @@ class DataFrame:
     # ------------------------------------------------------------------
     # Mutating helpers used in the project code
     # ------------------------------------------------------------------
+    def sort_index(
+        self,
+        axis: int = 0,
+        ascending: bool = True,
+        inplace: bool = False,
+    ) -> "DataFrame" | None:
+        """Return a new frame with the index sorted."""
+
+        if axis not in (0, "index"):
+            raise NotImplementedError("This shim only supports sorting the index")
+
+        ordered_positions = sorted(
+            enumerate(self.index),
+            key=lambda item: item[1],
+            reverse=not ascending,
+        )
+
+        new_index_values = [label for _, label in ordered_positions]
+        new_index = _ensure_index(new_index_values, name=self.index.name)
+
+        new_columns = {}
+        for name, series in self._data.items():
+            new_columns[name] = [series._data[pos] for pos, _ in ordered_positions]
+
+        if inplace:
+            self.index = new_index
+            for name, values in new_columns.items():
+                self._data[name] = Series(values, index=self.index[:], name=name)
+            return None
+
+        return DataFrame(new_columns, index=new_index)
+
     def rename(self, *, columns: Mapping[str, str] | None = None, inplace: bool = False):
         if not columns:
             return None if inplace else self.copy()
