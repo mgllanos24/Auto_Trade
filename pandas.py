@@ -15,6 +15,12 @@ from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import numpy as np
 
+# Provide a ``__version__`` attribute so libraries performing runtime
+# compatibility checks (such as scikit-learn) can operate without failing
+# during import.  The value itself is not important for the test shim; any
+# valid version string will suffice.
+__version__ = "0.1.0"
+
 NaT = None
 
 
