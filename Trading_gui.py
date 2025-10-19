@@ -25,6 +25,7 @@ import time
 import threading
 import signal
 import json
+from typing import Any, Callable, Optional
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
 
@@ -71,6 +72,67 @@ symbol_data = {}
 _long_name_cache = {}
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
+
+
+def _resolve_min_size(kwargs: dict[str, Any], fallback: int = 40) -> int:
+    window = kwargs.get("window")
+    flagpole_window = kwargs.get("flagpole_window")
+    cup_window = kwargs.get("cup_window")
+    handle_window = kwargs.get("handle_window")
+
+    if window is not None:
+        if flagpole_window:
+            return int(window) + int(flagpole_window)
+        return int(window)
+
+    if cup_window is not None and handle_window is not None:
+        return int(cup_window) + int(handle_window)
+
+    return fallback
+
+
+def _detect_with_trimming(
+    detector: Callable[..., Any],
+    df: pd.DataFrame,
+    *,
+    max_trim: int = 10,
+    min_size: Optional[int] = None,
+    **kwargs: Any,
+):
+    if min_size is None:
+        min_size = _resolve_min_size(kwargs, fallback=40)
+
+    for trim in range(1, max_trim + 1):
+        if len(df) - trim < min_size:
+            break
+        trimmed = df.iloc[:-trim]
+        result = detector(trimmed, **kwargs)
+        if result:
+            return result
+
+    return None
+
+
+def _scan_with_trimming(
+    scanner: Callable[..., Any],
+    df: pd.DataFrame,
+    *,
+    max_trim: int = 10,
+    min_size: Optional[int] = None,
+    **kwargs: Any,
+):
+    if min_size is None:
+        min_size = _resolve_min_size(kwargs, fallback=40)
+
+    for trim in range(1, max_trim + 1):
+        if len(df) - trim < min_size:
+            break
+        trimmed = df.iloc[:-trim]
+        results = scanner(trimmed, **kwargs)
+        if results:
+            return results
+
+    return []
 
 def save_active_monitor(iid):
     data = order_tree.item(iid)['values']
@@ -400,6 +462,15 @@ def show_candlestick():
             hits = scan_double_bottoms(analysis_df, window=60)
             if not hits:
                 hits = scan_double_bottoms(analysis_df, window=60, require_breakout=False)
+            if not hits:
+                hits = _scan_with_trimming(scan_double_bottoms, analysis_df, window=60)
+            if not hits:
+                hits = _scan_with_trimming(
+                    scan_double_bottoms,
+                    analysis_df,
+                    window=60,
+                    require_breakout=False,
+                )
             if hits:
                 hit = max(hits, key=lambda h: h.right_idx)
                 if isinstance(hit, DoubleBottomHit):
@@ -449,13 +520,26 @@ def show_candlestick():
                     except Exception:
                         pass
         elif name_lower == "cup and handle":
-            hit = detect_cup_and_handle(analysis_df)
+            hit = detect_cup_and_handle(analysis_df, cup_window=60, handle_window=15)
+            if not hit:
+                hit = _detect_with_trimming(
+                    detect_cup_and_handle,
+                    analysis_df,
+                    cup_window=60,
+                    handle_window=15,
+                )
             if isinstance(hit, CupHandleHit):
                 resistance = hit.resistance
                 ax_price.axhline(resistance, color='#9467bd', linestyle='--', linewidth=1.5, label='Resistance')
                 overlay_added = True
         elif name_lower == "inverse head and shoulders":
             ihs = detect_inverse_head_shoulders(analysis_df)
+            if not ihs:
+                ihs = _detect_with_trimming(
+                    detect_inverse_head_shoulders,
+                    analysis_df,
+                    min_size=60,
+                )
             if isinstance(ihs, InverseHeadShouldersPattern):
                 try:
                     indices = [ihs.left_idx, ihs.head_idx, ihs.right_idx]
@@ -477,7 +561,15 @@ def show_candlestick():
                 except Exception:
                     pass
         elif name_lower == "ascending triangle":
-            triangle = detect_ascending_triangle(analysis_df)
+            triangle = detect_ascending_triangle(analysis_df, window=60, tolerance=0.02, min_touches=2)
+            if not triangle:
+                triangle = _detect_with_trimming(
+                    detect_ascending_triangle,
+                    analysis_df,
+                    window=60,
+                    tolerance=0.02,
+                    min_touches=2,
+                )
             if isinstance(triangle, AscendingTrianglePattern):
                 start_idx = triangle.offset
                 end_idx = triangle.offset + triangle.length - 1
@@ -527,7 +619,14 @@ def show_candlestick():
                             sup_label = None
                             overlay_added = True
         elif name_lower == "bullish pennant":
-            pennant = detect_bullish_pennant(analysis_df)
+            pennant = detect_bullish_pennant(analysis_df, window=60, flagpole_window=20)
+            if not pennant:
+                pennant = _detect_with_trimming(
+                    detect_bullish_pennant,
+                    analysis_df,
+                    window=60,
+                    flagpole_window=20,
+                )
             if isinstance(pennant, BullishPennantPattern):
                 start_idx = pennant.offset
                 end_idx = pennant.offset + pennant.length - 1
@@ -542,7 +641,14 @@ def show_candlestick():
                     ax_price.plot(dates, [lower_start, lower_end], color='#ff7f0e', linewidth=1.5, label='Pennant Lower')
                     overlay_added = True
         elif name_lower == "bullish flag":
-            flag = detect_bullish_flag(analysis_df)
+            flag = detect_bullish_flag(analysis_df, window=40, flagpole_window=20)
+            if not flag:
+                flag = _detect_with_trimming(
+                    detect_bullish_flag,
+                    analysis_df,
+                    window=40,
+                    flagpole_window=20,
+                )
             if isinstance(flag, BullishFlagPattern):
                 start_idx = flag.offset
                 end_idx = flag.offset + flag.length - 1
@@ -557,7 +663,13 @@ def show_candlestick():
                     ax_price.plot(dates, lower_line, color='#ff7f0e', linewidth=1.5, label='Flag Lower')
                     overlay_added = True
         elif name_lower == "bullish rectangle":
-            rectangle = detect_bullish_rectangle(analysis_df)
+            rectangle = detect_bullish_rectangle(analysis_df, window=60)
+            if not rectangle:
+                rectangle = _detect_with_trimming(
+                    detect_bullish_rectangle,
+                    analysis_df,
+                    window=60,
+                )
             if isinstance(rectangle, BullishRectanglePattern):
                 start_idx = rectangle.offset
                 end_idx = rectangle.offset + rectangle.length - 1
@@ -567,7 +679,13 @@ def show_candlestick():
                     ax_price.hlines(rectangle.low, dates[0], dates[-1], colors='#d62728', linestyles='--', linewidth=1.5, label='Rectangle Low')
                     overlay_added = True
         elif name_lower == "rounding bottom":
-            rounding = detect_rounding_bottom(analysis_df)
+            rounding = detect_rounding_bottom(analysis_df, window=100)
+            if not rounding:
+                rounding = _detect_with_trimming(
+                    detect_rounding_bottom,
+                    analysis_df,
+                    window=100,
+                )
             if isinstance(rounding, RoundingBottomPattern):
                 start_idx = rounding.offset
                 end_idx = rounding.offset + rounding.length - 1
@@ -582,6 +700,12 @@ def show_candlestick():
                     overlay_added = True
         elif name_lower == "breakaway gap":
             gap = detect_breakaway_gap(analysis_df)
+            if not gap:
+                gap = _detect_with_trimming(
+                    detect_breakaway_gap,
+                    analysis_df,
+                    min_size=35,
+                )
             if isinstance(gap, BreakawayGapPattern):
                 prev_idx = gap.prev_close_idx
                 curr_idx = gap.curr_open_idx
