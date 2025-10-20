@@ -132,9 +132,82 @@ EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 
     'ISTB', 'IUSB', 'SCZ', 'IXUS', 'JEPQ', 'USIG', 'BSCQ', 'SHV', 'SHY', 'VCIT', 'VCLT', 'VCSH',
     'VGIT', 'VGLT', 'SMH', 'VGSH', 'BNDX', 'BND', 'MBB', 'MCHI', 'AAPU', 'METU', 'VMBS', 'SOXX', 'SQQQ']
 
+def _flatten_columns(columns) -> list[str]:
+    """Return a 1-D list of column labels from a MultiIndex.
+
+    Yahoo Finance occasionally returns price data with a two-level column
+    index.  Depending on the ``group_by`` behaviour of ``yf.download`` the
+    price field names (Open, High, Low, Close, Volume) may be found on either
+    level of that index.  The previous implementation always selected the
+    first
+    level which breaks when the first level contains the ticker symbol for
+    every column (resulting in duplicate column names such as ``['NE', 'NE', …]``).
+    Later calls to :func:`pandas.to_numeric` expect a Series but instead
+    receive a DataFrame whenever duplicate column names exist, triggering the
+    user-facing ``"arg must be a list, tuple, 1-d array, or Series"`` error.
+
+    This helper inspects every level and prefers the one that actually
+    contains the OHLCV labels.  When no such level is present we gracefully
+    fall back to joining the tuple entries, ensuring we always return a simple
+    list of strings.
+    """
+
+    expected_labels = {"open", "high", "low", "close", "volume"}
+    get_level = getattr(columns, "get_level_values", None)
+    nlevels = getattr(columns, "nlevels", 1)
+
+    if callable(get_level):
+        for level in range(nlevels):
+            level_values = list(get_level(level))
+            normalized = {str(value).lower() for value in level_values}
+            if expected_labels.issubset(normalized):
+                # Use this level directly – it already contains the OHLCV
+                # field names we need for downstream processing.
+                return [str(value) for value in level_values]
+
+    flattened: list[str] = []
+    for column in columns:
+        if isinstance(column, tuple):
+            parts = [str(part) for part in column if part not in (None, "")]
+            # Try to pick the first tuple component that looks like an OHLCV
+            # label so that we keep familiar column names whenever possible.
+            chosen = next(
+                (
+                    part
+                    for part in parts
+                    if isinstance(part, str)
+                    and part.lower() in expected_labels
+                ),
+                None,
+            )
+            flattened.append(chosen if chosen is not None else "_".join(parts))
+        else:
+            flattened.append(str(column))
+
+    return flattened
+
+
 def flatten_yf_columns(df):
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
+    columns = getattr(df, "columns", None)
+    multi_index_cls = getattr(pd, "MultiIndex", None)
+
+    if columns is None:
+        return df
+
+    is_multi_index = False
+    if multi_index_cls is not None and isinstance(columns, multi_index_cls):
+        is_multi_index = True
+    elif getattr(columns, "nlevels", 1) > 1:
+        is_multi_index = True
+
+    if is_multi_index:
+        df.columns = _flatten_columns(columns)
+        # Drop duplicate columns (yfinance can occasionally return multiple
+        # copies of the same field when the ticker level is preserved).
+        duplicated = getattr(df.columns, "duplicated", None)
+        if callable(duplicated):
+            df = df.loc[:, ~duplicated()]
+
     return df
 
 
