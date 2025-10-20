@@ -17,8 +17,10 @@ import subprocess
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+import math
 import pandas as pd
 import yfinance as yf
+import numpy as np
 import mplfinance as mpf
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import time
@@ -74,6 +76,7 @@ root.geometry("1400x900")
 symbol_data = {}
 _long_name_cache = {}
 _institution_activity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_institution_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
@@ -105,6 +108,52 @@ def _format_share_amount(value: Optional[float]) -> str:
         if absolute >= threshold:
             return f"{value / threshold:.1f}{suffix}"
     return f"{value:.0f}"
+
+
+def _format_price(value: Optional[float]) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return str(value)
+
+
+def _format_percent(value: Optional[float], *, signed: bool = False) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return str(value)
+
+    if signed:
+        return f"{numeric:+.2f}%"
+    return f"{numeric:.2f}%"
+
+
+def _format_int(value: Optional[float]) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+    try:
+        return f"{int(value)}"
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return str(value)
+
+
+def _format_shares(value: Optional[float]) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+    return _format_share_amount(value)
+
+
+def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return str(value)
 
 
 def _normalise_report_date(raw: Any) -> str:
@@ -145,6 +194,43 @@ def _parse_report_datetime(raw: Any) -> Optional[datetime]:
         return parsed.to_pydatetime()
 
     return None
+
+
+def money_flow_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    typical_price = (df["High"] + df["Low"] + df["Close"]) / 3.0
+    raw_money_flow = typical_price * df["Volume"]
+
+    positive_flow = np.where(typical_price > typical_price.shift(1), raw_money_flow, 0.0)
+    negative_flow = np.where(typical_price < typical_price.shift(1), raw_money_flow, 0.0)
+
+    pos_mf = pd.Series(positive_flow, index=df.index).rolling(period, min_periods=period).sum()
+    neg_mf = pd.Series(negative_flow, index=df.index).rolling(period, min_periods=period).sum()
+
+    money_flow_ratio = pos_mf / neg_mf.replace(0, np.nan)
+    mfi = 100 - (100 / (1 + money_flow_ratio))
+    return mfi.fillna(method="bfill").fillna(50.0)
+
+
+def accumulation_distribution(df: pd.DataFrame) -> pd.Series:
+    clv = ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / (df["High"] - df["Low"])
+    clv = clv.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    return (clv * df["Volume"]).cumsum()
+
+
+def slope(series: pd.Series, lookback: int = 60) -> float:
+    clean = series.dropna()
+    if len(clean) < lookback:
+        return float("nan")
+
+    y = clean.iloc[-lookback:].to_numpy(dtype=float)
+    x = np.arange(len(y))
+    denominator = x - x.mean()
+    denominator = np.sum(denominator ** 2)
+    if denominator == 0:
+        return float("nan")
+
+    numerator = np.sum((x - x.mean()) * (y - y.mean()))
+    return float(numerator / denominator)
 
 
 def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str]]:
@@ -202,6 +288,91 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
 
     _institution_activity_cache[symbol] = (now, recent_entries)
     return recent_entries, None
+
+
+def fetch_institution_snapshot(
+    symbol: str, price_history: Optional[pd.DataFrame] = None
+) -> tuple[dict[str, Any], Optional[str]]:
+    now = time.time()
+    cached = _institution_snapshot_cache.get(symbol)
+    if cached and now - cached[0] < INSTITUTION_CACHE_TTL:
+        return cached[1], None
+
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    hist = None
+    if price_history is not None:
+        normalized_columns = {str(col).strip().title() for col in price_history.columns}
+        if required_cols.issubset(normalized_columns):
+            hist = price_history.copy()
+
+    if hist is None or hist.empty:
+        try:
+            fetched = yf.download(symbol, period="1y", interval="1d", auto_adjust=False, progress=False)
+        except Exception as exc:  # pragma: no cover - network
+            return {}, f"Unable to load price history ({exc})."
+        hist = flatten_yf_columns(fetched)
+
+    if hist is None or hist.empty:
+        return {}, "Unable to load price history."
+
+    hist = hist.rename(columns=str.title)
+    if not required_cols.issubset(hist.columns):
+        return {}, "Incomplete price history for institutional summary."
+
+    hist = hist.sort_index()
+    ohlcv = hist[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+    if ohlcv.empty:
+        return {}, "Insufficient data for institutional summary."
+
+    mfi_14 = money_flow_index(ohlcv, period=14).iloc[-1]
+    ad_line = accumulation_distribution(ohlcv)
+    ad_slope_60 = slope(ad_line, lookback=60)
+    price_change_21d = float("nan")
+    if len(ohlcv) >= 21:
+        price_change_21d = (ohlcv["Close"].iloc[-1] / ohlcv["Close"].iloc[-21] - 1.0) * 100.0
+
+    close_price = float(ohlcv["Close"].iloc[-1])
+
+    inst_summary = {
+        "close": round(close_price, 2),
+        "mfi_14": round(float(mfi_14), 2) if not math.isnan(float(mfi_14)) else float("nan"),
+        "ad_slope_60": round(float(ad_slope_60), 2) if not math.isnan(ad_slope_60) else float("nan"),
+        "price_chg_21d_pct": round(float(price_change_21d), 2)
+        if not math.isnan(price_change_21d)
+        else float("nan"),
+        "inst_count": float("nan"),
+        "inst_shares_sum": float("nan"),
+        "inst_latest_report": None,
+        "pct_held_by_institutions": float("nan"),
+    }
+
+    try:
+        ticker = yf.Ticker(symbol)
+        holders = ticker.institutional_holders
+        if isinstance(holders, pd.DataFrame) and not holders.empty:
+            inst_summary["inst_count"] = float(holders.shape[0])
+            if "Shares" in holders.columns:
+                inst_summary["inst_shares_sum"] = float(holders["Shares"].fillna(0).sum())
+
+            for column_name in ("Date Reported", "Date", "date"):
+                if column_name in holders.columns:
+                    latest = pd.to_datetime(holders[column_name], errors="coerce").max()
+                    if pd.notna(latest):
+                        inst_summary["inst_latest_report"] = latest.to_pydatetime()
+                    break
+
+        major = ticker.get_major_holders()
+        if isinstance(major, pd.DataFrame) and not major.empty:
+            major.columns = ["metric", "value"]
+            mask = major["metric"].str.contains("Institutions", case=False, na=False)
+            if mask.any():
+                inst_summary["pct_held_by_institutions"] = float(major.loc[mask, "value"].iloc[0])
+    except Exception as exc:  # pragma: no cover - network
+        return inst_summary, f"Unable to load institutional snapshot ({exc})."
+
+    _institution_snapshot_cache[symbol] = (now, inst_summary)
+    return inst_summary, None
 
 
 def _detect_with_trimming(
@@ -501,7 +672,6 @@ def show_candlestick():
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     import matplotlib.ticker as mticker
-    import numpy as np
 
     sel = tree.selection()
     if not sel:
@@ -528,6 +698,7 @@ def show_candlestick():
     for w in chart_frame.winfo_children():
         w.destroy()
 
+    snapshot_summary, snapshot_error = fetch_institution_snapshot(sym, df)
     activity_entries, activity_error = fetch_institution_activity(sym)
 
     info_panel = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
@@ -543,6 +714,111 @@ def show_candlestick():
     ).pack(fill="x")
 
     content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
+
+    if snapshot_summary:
+        tk.Label(
+            info_panel,
+            text=f"Last close: {_format_price(snapshot_summary.get('close'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        price_change = snapshot_summary.get("price_chg_21d_pct")
+        change_value = (
+            price_change
+            if isinstance(price_change, (int, float)) and not pd.isna(price_change)
+            else None
+        )
+        if change_value is None or change_value == 0:
+            change_color = "#333333"
+        elif change_value > 0:
+            change_color = "green"
+        else:
+            change_color = "red"
+        tk.Label(
+            info_panel,
+            text=f"21-day change: {_format_percent(price_change, signed=True)}",
+            justify="left",
+            wraplength=240,
+            fg=change_color,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        tk.Label(
+            info_panel,
+            text=f"MFI (14): {_format_decimal(snapshot_summary.get('mfi_14'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        tk.Label(
+            info_panel,
+            text=f"A/D slope (60): {_format_decimal(snapshot_summary.get('ad_slope_60'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        tk.Label(
+            info_panel,
+            text=f"Institutional filers: {_format_int(snapshot_summary.get('inst_count'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        tk.Label(
+            info_panel,
+            text=f"Institutional shares: {_format_shares(snapshot_summary.get('inst_shares_sum'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        latest_report = snapshot_summary.get("inst_latest_report")
+        if isinstance(latest_report, datetime):
+            latest_report_text = latest_report.strftime("%Y-%m-%d")
+        else:
+            latest_report_text = "N/A"
+
+        tk.Label(
+            info_panel,
+            text=f"Latest 13F report: {latest_report_text}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+        tk.Label(
+            info_panel,
+            text=f"% held by institutions: {_format_percent(snapshot_summary.get('pct_held_by_institutions'))}",
+            justify="left",
+            wraplength=240,
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(**content_pad)
+
+    if snapshot_error:
+        tk.Label(
+            info_panel,
+            text=snapshot_error,
+            justify="left",
+            wraplength=240,
+            fg="red",
+            bg="#f5f5f5",
+            anchor="w",
+        ).pack(fill="x", padx=4, pady=(4, 2))
+
+    ttk.Separator(info_panel, orient="horizontal").pack(fill="x", padx=4, pady=(4, 4))
 
     if activity_error:
         tk.Label(
