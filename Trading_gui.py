@@ -159,7 +159,14 @@ def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
 
 
 def _normalise_report_date(raw: Any) -> str:
-    if not raw:
+    if raw is None:
+        return "N/A"
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        return cleaned or "N/A"
+    if isinstance(raw, (datetime, pd.Timestamp)):
+        return raw.strftime("%Y-%m-%d")
+    if pd.isna(raw):
         return "N/A"
     if isinstance(raw, (int, float)):
         try:
