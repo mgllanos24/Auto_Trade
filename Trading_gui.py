@@ -51,6 +51,7 @@ from pattern_scanner import (
     detect_bullish_rectangle,
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
+    WATCHLIST_PATH,
 )
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
@@ -65,9 +66,10 @@ def get_api(symbol):
     return live_api if is_crypto(symbol) else paper_api
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-WATCHLIST_PATH = SCRIPT_DIR / "watchlist.csv"
 DATA_DIR = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 root = tk.Tk()
 root.title("Stock Scanner GUI")
@@ -357,86 +359,17 @@ def fetch_institution_snapshot(
     try:
         ticker = yf.Ticker(symbol)
         holders = ticker.institutional_holders
-        top_holders: list[dict[str, Any]] = []
         if isinstance(holders, pd.DataFrame) and not holders.empty:
-            normalized = holders.copy()
-            normalized.columns = [str(col).strip().lower() for col in normalized.columns]
+            inst_summary["inst_count"] = float(holders.shape[0])
+            if "Shares" in holders.columns:
+                inst_summary["inst_shares_sum"] = float(holders["Shares"].fillna(0).sum())
 
-            inst_summary["inst_count"] = float(len(normalized))
-
-            shares_column = next(
-                (col for col in ("shares", "share") if col in normalized.columns),
-                None,
-            )
-            if shares_column:
-                shares_series = pd.to_numeric(normalized[shares_column], errors="coerce")
-                inst_summary["inst_shares_sum"] = float(shares_series.fillna(0).sum())
-
-            date_column = next(
-                (col for col in ("date reported", "reportdate", "date") if col in normalized.columns),
-                None,
-            )
-            if date_column:
-                latest = pd.to_datetime(normalized[date_column], errors="coerce").max()
-                if pd.notna(latest):
-                    inst_summary["inst_latest_report"] = (
-                        latest.to_pydatetime() if hasattr(latest, "to_pydatetime") else latest
-                    )
-
-            name_column = next(
-                (col for col in ("holder", "name", "organization") if col in normalized.columns),
-                None,
-            )
-            value_column = next(
-                (col for col in ("value", "marketvalue", "market value") if col in normalized.columns),
-                None,
-            )
-            pct_column = next(
-                (
-                    col
-                    for col in ("pctheld", "% held", "%_held", "pct of shares held")
-                    if col in normalized.columns
-                ),
-                None,
-            )
-
-            def _coerce_float(value: Any) -> Optional[float]:
-                numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-                if pd.isna(numeric):
-                    return None
-                return float(numeric)
-
-            sort_key = shares_column or value_column
-            if sort_key:
-                sorted_rows = normalized.sort_values(sort_key, ascending=False)
-            else:
-                sorted_rows = normalized
-
-            for _, row in sorted_rows.head(2).iterrows():
-                shares_float = _coerce_float(row.get(shares_column) if shares_column else None)
-
-                value_float = _coerce_float(row.get(value_column) if value_column else None)
-
-                pct_float = _coerce_float(row.get(pct_column) if pct_column else None)
-                if pct_float is not None and pct_float <= 1:
-                    pct_float *= 100
-
-                report_value = row.get(date_column) if date_column else None
-                report_text = "N/A"
-                if report_value not in (None, "") and not pd.isna(report_value):
-                    report_text = _normalise_report_date(report_value)
-
-                top_holders.append(
-                    {
-                        "name": (row.get(name_column) if name_column else None) or "Unknown",
-                        "shares": shares_float,
-                        "value": value_float,
-                        "pct_held": pct_float,
-                        "report_date": report_text,
-                    }
-                )
-
-        inst_summary["top_holders"] = top_holders
+            for column_name in ("Date Reported", "Date", "date"):
+                if column_name in holders.columns:
+                    latest = pd.to_datetime(holders[column_name], errors="coerce").max()
+                    if pd.notna(latest):
+                        inst_summary["inst_latest_report"] = latest.to_pydatetime()
+                    break
 
         major = ticker.get_major_holders()
         if isinstance(major, pd.DataFrame) and not major.empty:
@@ -882,65 +815,6 @@ def show_candlestick():
             bg="#f5f5f5",
             anchor="w",
         ).pack(**content_pad)
-
-        top_holders = snapshot_summary.get("top_holders") or []
-        if top_holders:
-            tk.Label(
-                info_panel,
-                text="Top institutional holders",
-                font=("Arial", 11, "bold"),
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(fill="x", padx=4, pady=(8, 2))
-
-            for holder in top_holders:
-                holder_frame = tk.Frame(info_panel, bg="#f5f5f5")
-                holder_frame.pack(fill="x", padx=2, pady=(4, 2))
-
-                tk.Label(
-                    holder_frame,
-                    text=holder.get("name", "Unknown"),
-                    font=("Arial", 10, "bold"),
-                    bg="#f5f5f5",
-                    anchor="w",
-                    justify="left",
-                    wraplength=240,
-                ).pack(fill="x")
-
-                tk.Label(
-                    holder_frame,
-                    text=f"Shares: {_format_shares(holder.get('shares'))}",
-                    bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
-
-                value = holder.get("value")
-                if value not in (None, "", "N/A") and not pd.isna(value):
-                    tk.Label(
-                        holder_frame,
-                        text=f"Value: {_format_price(value)}",
-                        bg="#f5f5f5",
-                        anchor="w",
-                    ).pack(**content_pad)
-
-                pct_held = holder.get("pct_held")
-                if pct_held not in (None, "", "N/A") and not pd.isna(pct_held):
-                    tk.Label(
-                        holder_frame,
-                        text=f"Ownership: {_format_percent(pct_held)}",
-                        bg="#f5f5f5",
-                        anchor="w",
-                    ).pack(**content_pad)
-
-                report_date_text = holder.get("report_date", "N/A")
-                if report_date_text and report_date_text != "N/A":
-                    tk.Label(
-                        holder_frame,
-                        text=f"Reported: {report_date_text}",
-                        fg="#666666",
-                        bg="#f5f5f5",
-                        anchor="w",
-                    ).pack(**content_pad)
 
     if snapshot_error:
         tk.Label(
