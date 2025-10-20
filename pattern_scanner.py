@@ -28,7 +28,38 @@ BASE_URL = 'https://paper-api.alpaca.markets'
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-WATCHLIST_PATH = SCRIPT_DIR / 'watchlist.csv'
+
+
+def _resolve_data_dir() -> Path:
+    """Return the directory used to persist shared scanner state.
+
+    The original implementation attempted to write ``watchlist.csv`` alongside
+    the sources which works when the repository is writable.  When users install
+    the package into a protected location (e.g. ``Program Files`` on Windows)
+    the process no longer has permission to create or modify that file and the
+    scanner crashes on start-up.  By default we now store the watchlist inside a
+    user-scoped application directory (``~/.auto_trade``) which is writable for
+    regular users.  The location can still be customised through environment
+    variables for advanced setups.
+    """
+
+    env_path = os.environ.get("AUTO_TRADE_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path.home() / ".auto_trade"
+
+
+DATA_DIR = _resolve_data_dir()
+
+
+def _resolve_watchlist_path() -> Path:
+    env_path = os.environ.get("AUTO_TRADE_WATCHLIST")
+    if env_path:
+        return Path(env_path).expanduser()
+    return DATA_DIR / "watchlist.csv"
+
+
+WATCHLIST_PATH = _resolve_watchlist_path()
 WATCHLIST_HEADER = [
     'symbol',
     'breakout_high',
@@ -892,6 +923,7 @@ def calculate_rr_price_action(df, entry_price):
 
 def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
     path = WATCHLIST_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
     volume_3mo = int(df['volume'].tail(60).sum())
 
     new_entry = [
@@ -924,6 +956,7 @@ def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
 
 def initialize_watchlist():
     """Create or reset the watchlist file with only the header."""
+    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(WATCHLIST_PATH, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(WATCHLIST_HEADER)
