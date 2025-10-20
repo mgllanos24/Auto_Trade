@@ -51,6 +51,7 @@ from pattern_scanner import (
     detect_bullish_rectangle,
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
+    WATCHLIST_PATH,
 )
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
@@ -65,9 +66,10 @@ def get_api(symbol):
     return live_api if is_crypto(symbol) else paper_api
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-WATCHLIST_PATH = SCRIPT_DIR / "watchlist.csv"
 DATA_DIR = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 root = tk.Tk()
 root.title("Stock Scanner GUI")
