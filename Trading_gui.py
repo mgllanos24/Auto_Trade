@@ -174,9 +174,53 @@ def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
     if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
         return "N/A"
     try:
-        return f"{float(value):.{decimals}f}"
+    return f"{float(value):.{decimals}f}"
     except (TypeError, ValueError):  # pragma: no cover - defensive
         return str(value)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    """Attempt to coerce Yahoo Finance numeric payloads into floats."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            if math.isnan(float(value)):
+                return None
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+        return float(value)
+
+    if isinstance(value, dict):
+        for key in ("raw", "value", "amount", "fmt"):
+            if key in value:
+                coerced = _coerce_float(value[key])
+                if coerced is not None:
+                    return coerced
+        return None
+
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned:
+            return None
+
+        multiplier = 1.0
+        upper = cleaned.upper()
+        for suffix, factor in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+            if upper.endswith(suffix):
+                multiplier = factor
+                cleaned = cleaned[: -len(suffix)]
+                break
+
+        cleaned = cleaned.replace("$", "").replace("%", "")
+        try:
+            return float(cleaned) * multiplier
+        except ValueError:
+            return None
+
+    return None
 
 
 def _normalise_report_date(raw: Any) -> str:
@@ -263,6 +307,24 @@ def slope(series: pd.Series, lookback: int = 60) -> float:
     return float(numerator / denominator)
 
 
+def _normalise_share_change_percent(entry: dict[str, Any]) -> Optional[float]:
+    for key in (
+        "pctChange",
+        "sharesChangePercent",
+        "shareChangePercent",
+        "sharePercentChange",
+        "percentageChange",
+    ):
+        value = entry.get(key)
+        numeric = _coerce_float(value)
+        if numeric is None:
+            continue
+        if abs(numeric) <= 1:
+            return numeric * 100
+        return numeric
+    return None
+
+
 def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optional[str]]:
     now = time.time()
     cached = _institution_activity_cache.get(symbol)
@@ -294,17 +356,31 @@ def fetch_institution_activity(symbol: str) -> tuple[list[dict[str, Any]], Optio
     for entry in raw_entries:
         if not isinstance(entry, dict):
             continue
-        net_activity = entry.get("netActivity")
-        purchased = entry.get("purchased")
-        sold = entry.get("soldOut")
+        net_activity = _coerce_float(entry.get("netActivity"))
+        purchased = _coerce_float(entry.get("purchased"))
+        sold = _coerce_float(entry.get("soldOut") or entry.get("sold"))
         organization = entry.get("organization") or "Unknown"
         report_datetime = _parse_report_datetime(entry.get("reportDate"))
+        shares_held = _coerce_float(entry.get("position") or entry.get("sharesHeld"))
+        share_change_pct = _normalise_share_change_percent(entry)
+        market_value = _coerce_float(entry.get("value"))
+        if net_activity is None:
+            net_activity = _coerce_float(entry.get("sharesChanged"))
+        if purchased is None:
+            purchased = 0.0
+        if sold is None:
+            sold = 0.0
+        if net_activity is None:
+            net_activity = 0.0
         parsed_entries.append(
             {
                 "organization": organization,
-                "net_activity": net_activity if net_activity is not None else 0,
-                "purchased": purchased if purchased is not None else 0,
-                "sold": sold if sold is not None else 0,
+                "net_activity": net_activity,
+                "purchased": purchased,
+                "sold": sold,
+                "shares_held": shares_held,
+                "share_change_pct": share_change_pct,
+                "market_value": market_value,
                 "report_date": _normalise_report_date(entry.get("reportDate")),
                 "report_datetime": report_datetime,
             }
@@ -984,11 +1060,13 @@ def show_candlestick():
         _render_section("Top accumulators (6M)", top_accumulators, True)
         _render_section("Top sellers (6M)", top_sellers, False)
 
-        top_investors = sorted(
-            activity_entries,
-            key=lambda entry: abs(entry.get("net_activity", 0) or 0),
-            reverse=True,
-        )[:3]
+        def _top_shareholder_key(entry: dict[str, Any]) -> float:
+            shares = entry.get("shares_held")
+            if isinstance(shares, (int, float)) and not pd.isna(shares):
+                return float(shares)
+            return abs(entry.get("net_activity", 0) or 0)
+
+        top_investors = sorted(activity_entries, key=_top_shareholder_key, reverse=True)[:3]
 
         if top_investors:
             tk.Label(
@@ -999,72 +1077,101 @@ def show_candlestick():
                 anchor="w",
             ).pack(fill="x", padx=4, pady=(10, 2))
 
-            for entry in top_investors:
-                investor_frame = tk.Frame(info_panel, bg="#f5f5f5")
-                investor_frame.pack(fill="x", padx=2, pady=(4, 0))
+            table_frame = tk.Frame(info_panel, bg="#f5f5f5")
+            table_frame.pack(fill="x", padx=2, pady=(4, 0))
 
+            headers = (
+                ("Investor", "w"),
+                ("Shares Held", "e"),
+                ("Share Change (%)", "e"),
+                ("Est. Buy/Sell ($M)", "e"),
+            )
+
+            for col, (label, anchor) in enumerate(headers):
+                tk.Label(
+                    table_frame,
+                    text=label,
+                    font=("Arial", 10, "bold"),
+                    bg="#f5f5f5",
+                    anchor=anchor,
+                ).grid(row=0, column=col, sticky=anchor, padx=2, pady=(0, 4))
+
+            table_frame.grid_columnconfigure(0, weight=1)
+
+            for row_index, entry in enumerate(top_investors, start=1):
                 organization = entry.get("organization", "Unknown")
-                purchased_shares = entry.get("purchased", 0) or 0
-                sold_shares = entry.get("sold", 0) or 0
+                shares_held = entry.get("shares_held")
+                share_change_pct = entry.get("share_change_pct")
                 net_shares = entry.get("net_activity", 0) or 0
 
-                try:
-                    purchased_shares = float(purchased_shares)
-                except (TypeError, ValueError):
-                    purchased_shares = 0.0
-                try:
-                    sold_shares = float(sold_shares)
-                except (TypeError, ValueError):
-                    sold_shares = 0.0
                 try:
                     net_shares = float(net_shares)
                 except (TypeError, ValueError):
                     net_shares = 0.0
 
-                estimated_buy = (
-                    purchased_shares * close_price_value if close_price_value is not None else None
-                )
-                estimated_sell = (
-                    sold_shares * close_price_value if close_price_value is not None else None
-                )
+                est_net_dollars: Optional[float]
+                if close_price_value is not None:
+                    est_net_dollars = net_shares * close_price_value
+                else:
+                    est_net_dollars = None
 
-                action_text = "Net bought" if net_shares > 0 else "Net sold" if net_shares < 0 else "Net"
-                net_color = "green" if net_shares > 0 else "red" if net_shares < 0 else "#555555"
+                if shares_held is None or (isinstance(shares_held, float) and pd.isna(shares_held)):
+                    shares_text = "N/A"
+                else:
+                    shares_text = _format_share_amount(float(shares_held))
+
+                if share_change_pct is None or (
+                    isinstance(share_change_pct, float) and pd.isna(share_change_pct)
+                ):
+                    change_text = "N/A"
+                    change_color = "#555555"
+                else:
+                    change_text = _format_percent(float(share_change_pct), signed=True)
+                    change_color = "green" if share_change_pct > 0 else "red" if share_change_pct < 0 else "#555555"
+
+                if est_net_dollars is None:
+                    estimated_text = "N/A"
+                    estimated_color = "#555555"
+                else:
+                    est_millions = est_net_dollars / 1_000_000
+                    estimated_text = f"{est_millions:+.2f}M"
+                    estimated_color = "green" if est_millions > 0 else "red" if est_millions < 0 else "#555555"
 
                 tk.Label(
-                    investor_frame,
+                    table_frame,
                     text=organization,
-                    font=("Arial", 10, "bold"),
+                    font=("Arial", 10),
                     bg="#f5f5f5",
                     anchor="w",
                     justify="left",
                     wraplength=240,
-                ).pack(fill="x")
+                ).grid(row=row_index, column=0, sticky="w", padx=2, pady=2)
 
                 tk.Label(
-                    investor_frame,
-                    text=f"{action_text}: {_format_share_amount(net_shares)} shares",
-                    fg=net_color,
+                    table_frame,
+                    text=shares_text,
+                    font=("Arial", 10),
                     bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
-
-                buy_text = _format_dollar_amount(estimated_buy) if estimated_buy is not None else "N/A"
-                sell_text = _format_dollar_amount(estimated_sell) if estimated_sell is not None else "N/A"
+                    anchor="e",
+                ).grid(row=row_index, column=1, sticky="e", padx=2, pady=2)
 
                 tk.Label(
-                    investor_frame,
-                    text=f"Est. bought: {buy_text}",
+                    table_frame,
+                    text=change_text,
+                    font=("Arial", 10),
+                    fg=change_color,
                     bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
+                    anchor="e",
+                ).grid(row=row_index, column=2, sticky="e", padx=2, pady=2)
 
                 tk.Label(
-                    investor_frame,
-                    text=f"Est. sold: {sell_text}",
+                    table_frame,
+                    text=estimated_text,
+                    font=("Arial", 10),
+                    fg=estimated_color,
                     bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
+                    anchor="e",
+                ).grid(row=row_index, column=3, sticky="e", padx=2, pady=2)
 
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
