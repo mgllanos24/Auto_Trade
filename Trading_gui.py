@@ -174,7 +174,7 @@ def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
     if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
         return "N/A"
     try:
-    return f"{float(value):.{decimals}f}"
+        return f"{float(value):.{decimals}f}"
     except (TypeError, ValueError):  # pragma: no cover - defensive
         return str(value)
 
