@@ -722,6 +722,14 @@ def show_candlestick():
         bg="#f5f5f5",
     ).pack(fill="x")
 
+    tk.Label(
+        info_panel,
+        text=f"Symbol: {sym}",
+        font=("Arial", 11),
+        anchor="w",
+        bg="#f5f5f5",
+    ).pack(fill="x", padx=4, pady=(2, 4))
+
     content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
 
     if snapshot_summary:
