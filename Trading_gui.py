@@ -121,6 +121,27 @@ def _format_price(value: Optional[float]) -> str:
         return str(value)
 
 
+def _format_dollar_amount(value: Optional[float]) -> str:
+    if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
+        return "N/A"
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return str(value)
+
+    sign = "-" if numeric < 0 else ""
+    absolute = abs(numeric)
+    suffixes = ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K"))
+    for threshold, suffix in suffixes:
+        if absolute >= threshold:
+            return f"{sign}${absolute / threshold:.1f}{suffix}"
+
+    if absolute >= 1:
+        return f"{sign}${absolute:,.2f}"
+    return f"{sign}${absolute:.2f}"
+
+
 def _format_percent(value: Optional[float], *, signed: bool = False) -> str:
     if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
         return "N/A"
@@ -829,6 +850,32 @@ def show_candlestick():
 
     ttk.Separator(info_panel, orient="horizontal").pack(fill="x", padx=4, pady=(4, 4))
 
+    close_price_value: Optional[float] = None
+    if snapshot_summary:
+        maybe_close = snapshot_summary.get("close")
+        if not isinstance(maybe_close, str):
+            try:
+                numeric_close = float(maybe_close)
+            except (TypeError, ValueError):
+                numeric_close = float("nan")
+            if not pd.isna(numeric_close):
+                close_price_value = numeric_close
+
+    if close_price_value is None:
+        try:
+            if "Close" in df:
+                last_close = df["Close"].dropna().iloc[-1]
+            elif ("Adj Close" in df):
+                last_close = df["Adj Close"].dropna().iloc[-1]
+            else:
+                last_close = None
+            if last_close is not None:
+                maybe_last_close = float(last_close)
+                if not pd.isna(maybe_last_close):
+                    close_price_value = maybe_last_close
+        except (IndexError, KeyError, ValueError, TypeError):
+            close_price_value = None
+
     if activity_error:
         tk.Label(
             info_panel,
@@ -928,6 +975,88 @@ def show_candlestick():
 
         _render_section("Top accumulators (6M)", top_accumulators, True)
         _render_section("Top sellers (6M)", top_sellers, False)
+
+        top_investors = sorted(
+            activity_entries,
+            key=lambda entry: abs(entry.get("net_activity", 0) or 0),
+            reverse=True,
+        )[:3]
+
+        if top_investors:
+            tk.Label(
+                info_panel,
+                text="Top investors (6M)",
+                font=("Arial", 11, "bold"),
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=(10, 2))
+
+            for entry in top_investors:
+                investor_frame = tk.Frame(info_panel, bg="#f5f5f5")
+                investor_frame.pack(fill="x", padx=2, pady=(4, 0))
+
+                organization = entry.get("organization", "Unknown")
+                purchased_shares = entry.get("purchased", 0) or 0
+                sold_shares = entry.get("sold", 0) or 0
+                net_shares = entry.get("net_activity", 0) or 0
+
+                try:
+                    purchased_shares = float(purchased_shares)
+                except (TypeError, ValueError):
+                    purchased_shares = 0.0
+                try:
+                    sold_shares = float(sold_shares)
+                except (TypeError, ValueError):
+                    sold_shares = 0.0
+                try:
+                    net_shares = float(net_shares)
+                except (TypeError, ValueError):
+                    net_shares = 0.0
+
+                estimated_buy = (
+                    purchased_shares * close_price_value if close_price_value is not None else None
+                )
+                estimated_sell = (
+                    sold_shares * close_price_value if close_price_value is not None else None
+                )
+
+                action_text = "Net bought" if net_shares > 0 else "Net sold" if net_shares < 0 else "Net"
+                net_color = "green" if net_shares > 0 else "red" if net_shares < 0 else "#555555"
+
+                tk.Label(
+                    investor_frame,
+                    text=organization,
+                    font=("Arial", 10, "bold"),
+                    bg="#f5f5f5",
+                    anchor="w",
+                    justify="left",
+                    wraplength=240,
+                ).pack(fill="x")
+
+                tk.Label(
+                    investor_frame,
+                    text=f"{action_text}: {_format_share_amount(net_shares)} shares",
+                    fg=net_color,
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
+
+                buy_text = _format_dollar_amount(estimated_buy) if estimated_buy is not None else "N/A"
+                sell_text = _format_dollar_amount(estimated_sell) if estimated_sell is not None else "N/A"
+
+                tk.Label(
+                    investor_frame,
+                    text=f"Est. bought: {buy_text}",
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
+
+                tk.Label(
+                    investor_frame,
+                    text=f"Est. sold: {sell_text}",
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(**content_pad)
 
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
