@@ -83,6 +83,23 @@ INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
 
+SECTOR_ETF_MAP = {
+    "Basic Materials": "XLB",
+    "Communication Services": "XLC",
+    "Consumer Cyclical": "XLY",
+    "Consumer Defensive": "XLP",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Financial Services": "XLF",
+    "Financial": "XLF",
+    "Healthcare": "XLV",
+    "Health Care": "XLV",
+    "Industrials": "XLI",
+    "Real Estate": "XLRE",
+    "Technology": "XLK",
+    "Utilities": "XLU",
+}
+
 
 def _resolve_min_size(kwargs: dict[str, Any], fallback: int = 40) -> int:
     window = kwargs.get("window")
@@ -356,6 +373,27 @@ def on_balance_volume(df: pd.DataFrame) -> pd.Series:
     return pd.Series(obv, index=df.index)
 
 
+def average_true_range(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate the Average True Range (ATR)."""
+
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+
+    prev_close = close.shift(1)
+    tr_components = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    )
+    true_range = tr_components.max(axis=1)
+    atr = true_range.rolling(period, min_periods=period).mean()
+    return atr
+
+
 def slope(series: pd.Series, lookback: int = 60) -> float:
     clean = series.dropna()
     if len(clean) < lookback:
@@ -522,6 +560,14 @@ def fetch_institution_snapshot(
     if len(ohlcv) >= 5:
         volume_avg_30 = float(ohlcv["Volume"].tail(30).mean())
 
+    atr_value = float("nan")
+    try:
+        atr_series = average_true_range(ohlcv, period=14)
+        if atr_series.notna().any():
+            atr_value = float(atr_series.dropna().iloc[-1])
+    except Exception:  # pragma: no cover - defensive
+        atr_value = float("nan")
+
     inst_summary = {
         "close": round(close_price, 2),
         "mfi_14": round(float(mfi_14), 2) if not math.isnan(float(mfi_14)) else float("nan"),
@@ -541,6 +587,27 @@ def fetch_institution_snapshot(
         "top_holders": [],
         "insider_buys_3m": None,
         "insider_sells_3m": None,
+        "pe_ttm": float("nan"),
+        "forward_pe": float("nan"),
+        "peg_ratio": float("nan"),
+        "dividend_yield_pct": float("nan"),
+        "roe_pct": float("nan"),
+        "de_ratio": float("nan"),
+        "eps_growth_yoy_pct": float("nan"),
+        "revenue_growth_yoy_pct": float("nan"),
+        "free_cash_flow": float("nan"),
+        "analyst_rating": None,
+        "analyst_buy_count": None,
+        "analyst_hold_count": None,
+        "analyst_sell_count": None,
+        "avg_target_price": float("nan"),
+        "avg_target_upside_pct": float("nan"),
+        "short_interest_pct_float": float("nan"),
+        "next_earnings": None,
+        "sector": None,
+        "sector_etf": None,
+        "correlation": float("nan"),
+        "atr_14": round(float(atr_value), 2) if not math.isnan(atr_value) else float("nan"),
     }
 
     try:
@@ -603,6 +670,102 @@ def fetch_institution_snapshot(
             if mask.any():
                 inst_summary["pct_held_by_institutions"] = float(major.loc[mask, "value"].iloc[0])
 
+        info: dict[str, Any] = {}
+        try:
+            raw_info = ticker.get_info()
+        except Exception:
+            raw_info = {}
+        if isinstance(raw_info, dict):
+            info = raw_info
+
+        trailing_pe = _coerce_float(info.get("trailingPE")) if info else None
+        if trailing_pe is not None:
+            inst_summary["pe_ttm"] = float(trailing_pe)
+
+        forward_pe = _coerce_float(info.get("forwardPE")) if info else None
+        if forward_pe is not None:
+            inst_summary["forward_pe"] = float(forward_pe)
+
+        peg_ratio = _coerce_float(info.get("pegRatio")) if info else None
+        if peg_ratio is not None:
+            inst_summary["peg_ratio"] = float(peg_ratio)
+
+        dividend_yield = _coerce_float(info.get("dividendYield")) if info else None
+        if dividend_yield is not None:
+            if abs(dividend_yield) <= 1:
+                dividend_yield *= 100.0
+            inst_summary["dividend_yield_pct"] = float(dividend_yield)
+
+        roe_value = _coerce_float(info.get("returnOnEquity")) if info else None
+        if roe_value is not None:
+            if abs(roe_value) <= 1:
+                roe_value *= 100.0
+            inst_summary["roe_pct"] = float(roe_value)
+
+        debt_to_equity = _coerce_float(info.get("debtToEquity")) if info else None
+        if debt_to_equity is not None:
+            inst_summary["de_ratio"] = float(debt_to_equity)
+
+        eps_growth = _coerce_float(info.get("earningsQuarterlyGrowth")) if info else None
+        if eps_growth is None and info:
+            eps_growth = _coerce_float(info.get("earningsGrowth"))
+        if eps_growth is not None:
+            if abs(eps_growth) <= 1:
+                eps_growth *= 100.0
+            inst_summary["eps_growth_yoy_pct"] = float(eps_growth)
+
+        revenue_growth = _coerce_float(info.get("revenueGrowth")) if info else None
+        if revenue_growth is not None:
+            if abs(revenue_growth) <= 1:
+                revenue_growth *= 100.0
+            inst_summary["revenue_growth_yoy_pct"] = float(revenue_growth)
+
+        free_cash_flow = _coerce_float(info.get("freeCashflow")) if info else None
+        if free_cash_flow is not None:
+            inst_summary["free_cash_flow"] = float(free_cash_flow)
+
+        avg_target_price = _coerce_float(info.get("targetMeanPrice")) if info else None
+        if avg_target_price is None and info:
+            avg_target_price = _coerce_float(info.get("targetMedianPrice"))
+        if avg_target_price is not None:
+            inst_summary["avg_target_price"] = float(avg_target_price)
+            if close_price:
+                try:
+                    if close_price != 0:
+                        upside = (avg_target_price - close_price) / close_price * 100.0
+                    else:
+                        upside = float("nan")
+                except Exception:  # pragma: no cover - defensive
+                    upside = float("nan")
+                if not math.isnan(upside):
+                    inst_summary["avg_target_upside_pct"] = float(upside)
+
+        short_interest = _coerce_float(info.get("shortPercentOfFloat")) if info else None
+        if short_interest is not None:
+            if abs(short_interest) <= 1:
+                short_interest *= 100.0
+            inst_summary["short_interest_pct_float"] = float(short_interest)
+
+        earnings_timestamp = None
+        if info:
+            for key in ("earningsTimestamp", "earningsTimestampStart", "earningsTimestampEnd"):
+                candidate = info.get(key)
+                earnings_timestamp = _parse_report_datetime(candidate)
+                if earnings_timestamp is not None:
+                    break
+        if earnings_timestamp is not None:
+            inst_summary["next_earnings"] = earnings_timestamp
+
+        sector_name = info.get("sector") if info else None
+        if isinstance(sector_name, str) and sector_name.strip():
+            cleaned_sector = sector_name.strip()
+            inst_summary["sector"] = cleaned_sector
+            inst_summary["sector_etf"] = SECTOR_ETF_MAP.get(cleaned_sector)
+
+        recommendation = info.get("recommendationKey") if info else None
+        if isinstance(recommendation, str) and recommendation:
+            inst_summary["analyst_rating"] = recommendation.replace("_", " ").title()
+
         try:
             fast_info = ticker.fast_info
         except Exception:
@@ -613,10 +776,6 @@ def fetch_institution_snapshot(
             if beta_candidate is None and isinstance(fast_info, dict):
                 beta_candidate = fast_info.get("beta")
         if beta_candidate is None:
-            try:
-                info = ticker.get_info()
-            except Exception:
-                info = {}
             beta_candidate = info.get("beta") if isinstance(info, dict) else None
         beta_numeric = _coerce_float(beta_candidate)
         if beta_numeric is not None:
@@ -969,7 +1128,6 @@ def show_candlestick():
         w.destroy()
 
     snapshot_summary, snapshot_error = fetch_institution_snapshot(sym, df)
-    activity_entries, activity_error = fetch_institution_activity(sym)
 
     info_panel = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
     info_panel.pack(side="left", fill="y", padx=(0, 10), pady=5)
@@ -1028,13 +1186,35 @@ def show_candlestick():
     content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
 
     if snapshot_summary:
-        tk.Label(
-            info_panel,
-            text="📊 Technical Summary",
-            font=("Arial", 11, "bold"),
-            anchor="w",
-            bg="#f5f5f5",
-        ).pack(fill="x", padx=4, pady=(0, 2))
+        separator_line = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        def add_separator(pady: tuple[int, int] = (4, 4)) -> None:
+            tk.Label(
+                info_panel,
+                text=separator_line,
+                font=("Arial", 10),
+                anchor="w",
+                bg="#f5f5f5",
+            ).pack(fill="x", padx=4, pady=pady)
+
+        def add_section(title: str, body: str, *, title_pady: tuple[int, int] = (0, 2)) -> None:
+            tk.Label(
+                info_panel,
+                text=title,
+                font=("Arial", 11, "bold"),
+                anchor="w",
+                bg="#f5f5f5",
+            ).pack(fill="x", padx=4, pady=title_pady)
+            tk.Label(
+                info_panel,
+                text=body,
+                justify="left",
+                wraplength=240,
+                bg="#f5f5f5",
+                anchor="w",
+            ).pack(**content_pad)
+
+        add_separator(pady=(4, 6))
 
         mfi_text = _format_decimal(snapshot_summary.get("mfi_14"))
         rsi_text = _format_decimal(snapshot_summary.get("rsi_14"))
@@ -1059,65 +1239,31 @@ def show_candlestick():
             f"Volume (30D Avg): {volume_text}      Beta: {beta_text}\n"
             f"Pattern: {pattern_display}      Signal: {signal_icon} {signal_description}"
         )
+        add_section("📊 Technical Summary", technical_text, title_pady=(0, 2))
 
-        tk.Label(
-            info_panel,
-            text=technical_text,
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
-
-        tk.Label(
-            info_panel,
-            text="🏦 Institutional Snapshot",
-            font=("Arial", 11, "bold"),
-            anchor="w",
-            bg="#f5f5f5",
-        ).pack(fill="x", padx=4, pady=(6, 2))
+        add_separator()
 
         filers_text = _format_int(snapshot_summary.get("inst_count"))
         shares_text = _format_shares(snapshot_summary.get("inst_shares_sum"))
         pct_text = _format_percent(snapshot_summary.get("pct_held_by_institutions"))
+        qoq_text = "N/A"
 
-        share_change_values: list[float] = []
-        for entry in activity_entries:
-            value = entry.get("share_change_pct")
-            if isinstance(value, (int, float)) and not pd.isna(value):
-                share_change_values.append(float(value))
-        qoq_change = float("nan")
-        if share_change_values:
-            qoq_change = sum(share_change_values) / len(share_change_values)
-        qoq_text = _format_percent(qoq_change, signed=True)
+        snapshot_lines = [
+            f"Filers: {filers_text}      Shares Held: {shares_text}",
+            f"Institutional %: {pct_text}      QoQ Change: {qoq_text}",
+        ]
 
-        snapshot_lines = (
-            f"Filers: {filers_text}      Shares Held: {shares_text}\n"
-            f"Institutional %: {pct_text}      QoQ Change: {qoq_text}"
-        )
-        tk.Label(
-            info_panel,
-            text=snapshot_lines,
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
-
-        latest_report = snapshot_summary.get("inst_latest_report")
-        if isinstance(latest_report, datetime):
-            latest_report_text = latest_report.strftime("%Y-%m-%d")
-        else:
-            latest_report_text = "N/A"
-
-        tk.Label(
-            info_panel,
-            text=f"Latest 13F report: {latest_report_text}",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
+        top_holders = snapshot_summary.get("top_holders") or []
+        if top_holders:
+            snapshot_lines.append("Top Holders:")
+            for holder in top_holders:
+                holder_name = holder.get("name", "Unknown")
+                pct_value = holder.get("pct")
+                if isinstance(pct_value, (int, float)) and not math.isnan(pct_value):
+                    holder_text = f"  - {holder_name} ({pct_value:.1f}%)"
+                else:
+                    holder_text = f"  - {holder_name}"
+                snapshot_lines.append(holder_text)
 
         insider_buys = snapshot_summary.get("insider_buys_3m")
         insider_sells = snapshot_summary.get("insider_sells_3m")
@@ -1136,40 +1282,97 @@ def show_candlestick():
         else:
             insider_sells_text = str(insider_sells)
 
-        tk.Label(
-            info_panel,
-            text=f"Insider Buys (3M): {insider_buys_text}      Insider Sells: {insider_sells_text}",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
+        snapshot_lines.append(
+            f"Insider Buys (3M): {insider_buys_text}         Insider Sells: {insider_sells_text}"
+        )
 
-        top_holders = snapshot_summary.get("top_holders") or []
-        if top_holders:
-            tk.Label(
-                info_panel,
-                text="Top Holders:",
-                font=("Arial", 10, "bold"),
-                anchor="w",
-                bg="#f5f5f5",
-            ).pack(fill="x", padx=6, pady=(4, 0))
+        add_section("🏦 Institutional Snapshot", "\n".join(snapshot_lines), title_pady=(0, 2))
 
-            for holder in top_holders:
-                holder_name = holder.get("name", "Unknown")
-                pct_value = holder.get("pct")
-                if isinstance(pct_value, (int, float)) and not math.isnan(pct_value):
-                    holder_text = f"  - {holder_name} ({pct_value:.1f}%)"
-                else:
-                    holder_text = f"  - {holder_name}"
-                tk.Label(
-                    info_panel,
-                    text=holder_text,
-                    justify="left",
-                    wraplength=240,
-                    bg="#f5f5f5",
-                    anchor="w",
-                ).pack(fill="x", padx=6, pady=(0, 2))
+        add_separator()
+
+        pe_text = _format_decimal(snapshot_summary.get("pe_ttm"))
+        fwd_pe_text = _format_decimal(snapshot_summary.get("forward_pe"))
+        peg_text = _format_decimal(snapshot_summary.get("peg_ratio"))
+        dividend_text = _format_percent(snapshot_summary.get("dividend_yield_pct"))
+        roe_text = _format_percent(snapshot_summary.get("roe_pct"))
+        de_text = _format_decimal(snapshot_summary.get("de_ratio"))
+        eps_growth_text = _format_percent(
+            snapshot_summary.get("eps_growth_yoy_pct"), signed=True
+        )
+        revenue_growth_text = _format_percent(
+            snapshot_summary.get("revenue_growth_yoy_pct"), signed=True
+        )
+        fcf_text = _format_dollar_amount(snapshot_summary.get("free_cash_flow"))
+
+        fundamentals_lines = [
+            f"P/E (TTM): {pe_text}     Forward P/E: {fwd_pe_text}",
+            f"PEG Ratio: {peg_text}      Dividend Yield: {dividend_text}",
+            f"ROE: {roe_text}          Debt/Equity: {de_text}",
+            f"EPS Growth (YoY): {eps_growth_text}",
+            f"Revenue Growth (YoY): {revenue_growth_text}",
+            f"Free Cash Flow (TTM): {fcf_text}",
+        ]
+        add_section("💰 Fundamentals", "\n".join(fundamentals_lines), title_pady=(0, 2))
+
+        add_separator()
+
+        rating_text = snapshot_summary.get("analyst_rating") or "N/A"
+        buy_count = snapshot_summary.get("analyst_buy_count")
+        hold_count = snapshot_summary.get("analyst_hold_count")
+        sell_count = snapshot_summary.get("analyst_sell_count")
+        counts_text = ""
+        if all(
+            isinstance(value, (int, float)) and not pd.isna(value)
+            for value in (buy_count, hold_count, sell_count)
+        ):
+            counts_text = f" ({int(buy_count)} Buy / {int(hold_count)} Hold / {int(sell_count)} Sell)"
+
+        target_price_text = _format_price(snapshot_summary.get("avg_target_price"))
+        upside_text = _format_percent(
+            snapshot_summary.get("avg_target_upside_pct"), signed=True
+        )
+        short_interest_text = _format_percent(snapshot_summary.get("short_interest_pct_float"))
+
+        next_earnings = snapshot_summary.get("next_earnings")
+        if isinstance(next_earnings, datetime):
+            next_earnings_text = next_earnings.strftime("%m/%d/%Y")
+        elif isinstance(next_earnings, str) and next_earnings.strip():
+            next_earnings_text = next_earnings
+        else:
+            next_earnings_text = "N/A"
+
+        market_lines = [
+            f"Analyst Rating: {rating_text}{counts_text}",
+            f"Avg Target: {target_price_text} ({upside_text} Upside)",
+            f"Short Interest: {short_interest_text}",
+            f"Next Earnings: {next_earnings_text}",
+        ]
+        add_section("📈 Market Sentiment", "\n".join(market_lines), title_pady=(0, 2))
+
+        add_separator()
+
+        sector = snapshot_summary.get("sector")
+        sector_etf = snapshot_summary.get("sector_etf")
+        if sector_etf and sector:
+            sector_text = f"{sector_etf} ({sector})"
+        elif sector_etf:
+            sector_text = sector_etf
+        elif sector:
+            sector_text = sector
+        else:
+            sector_text = "N/A"
+
+        correlation_text = _format_decimal(snapshot_summary.get("correlation"))
+        atr_text = _format_decimal(snapshot_summary.get("atr_14"))
+
+        risk_lines = [
+            f"Sector ETF: {sector_text}",
+            f"Correlation: {correlation_text}",
+            f"Volatility (ATR 14): {atr_text}",
+        ]
+        add_section("⚙️ Risk & Correlation", "\n".join(risk_lines), title_pady=(0, 2))
+
+        add_separator(pady=(6, 4))
 
     if snapshot_error:
         tk.Label(
@@ -1181,247 +1384,6 @@ def show_candlestick():
             bg="#f5f5f5",
             anchor="w",
         ).pack(fill="x", padx=4, pady=(4, 2))
-
-    ttk.Separator(info_panel, orient="horizontal").pack(fill="x", padx=4, pady=(4, 4))
-
-    close_price_value: Optional[float] = None
-    if snapshot_summary:
-        maybe_close = snapshot_summary.get("close")
-        if not isinstance(maybe_close, str):
-            try:
-                numeric_close = float(maybe_close)
-            except (TypeError, ValueError):
-                numeric_close = float("nan")
-            if not pd.isna(numeric_close):
-                close_price_value = numeric_close
-
-    if close_price_value is None:
-        try:
-            if "Close" in df:
-                last_close = df["Close"].dropna().iloc[-1]
-            elif ("Adj Close" in df):
-                last_close = df["Adj Close"].dropna().iloc[-1]
-            else:
-                last_close = None
-            if last_close is not None:
-                maybe_last_close = float(last_close)
-                if not pd.isna(maybe_last_close):
-                    close_price_value = maybe_last_close
-        except (IndexError, KeyError, ValueError, TypeError):
-            close_price_value = None
-
-    if activity_error:
-        tk.Label(
-            info_panel,
-            text=activity_error,
-            justify="left",
-            wraplength=240,
-            fg="red",
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=6)
-    elif not activity_entries:
-        tk.Label(
-            info_panel,
-            text="No institutional accumulation or selling reported in the past 6 months.",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=6)
-    else:
-        total_net = sum(entry.get("net_activity", 0) or 0 for entry in activity_entries)
-        net_color = "green" if total_net > 0 else "red" if total_net < 0 else "#555555"
-        tk.Label(
-            info_panel,
-            text=f"Net activity (6M): {_format_share_amount(total_net)} shares",
-            fg=net_color,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=(6, 2))
-
-        top_accumulators = sorted(
-            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) > 0),
-            key=lambda entry: entry.get("net_activity", 0) or 0,
-            reverse=True,
-        )[:3]
-        top_sellers = sorted(
-            (entry for entry in activity_entries if (entry.get("net_activity", 0) or 0) < 0),
-            key=lambda entry: entry.get("net_activity", 0) or 0,
-        )[:3]
-
-        if not top_accumulators and not top_sellers:
-            tk.Label(
-                info_panel,
-                text="No institutional accumulation or selling in the past 6 months.",
-                justify="left",
-                wraplength=240,
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(fill="x", padx=4, pady=6)
-
-        def _render_section(title: str, entries: list[dict[str, Any]], positive: bool) -> None:
-            if not entries:
-                return
-
-            tk.Label(
-                info_panel,
-                text=title,
-                font=("Arial", 11, "bold"),
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(fill="x", padx=4, pady=(8, 2))
-
-            for entry in entries:
-                frame = tk.Frame(info_panel, bg="#f5f5f5")
-                frame.pack(fill="x", padx=2, pady=(4, 0))
-
-                tk.Label(
-                    frame,
-                    text=entry.get("organization", "Unknown"),
-                    font=("Arial", 10, "bold"),
-                    bg="#f5f5f5",
-                    anchor="w",
-                    justify="left",
-                    wraplength=240,
-                ).pack(fill="x")
-
-                net_value = entry.get("net_activity", 0) or 0
-                action_color = "green" if positive else "red"
-                net_display = _format_share_amount(abs(net_value))
-                action_text = "Accumulated" if positive else "Sold"
-
-                tk.Label(
-                    frame,
-                    text=f"{action_text}: {net_display} shares",
-                    fg=action_color,
-                    bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
-
-                tk.Label(
-                    frame,
-                    text=f"Report: {entry.get('report_date', 'N/A')}",
-                    fg="#666666",
-                    bg="#f5f5f5",
-                    anchor="w",
-                ).pack(**content_pad)
-
-        _render_section("Top accumulators (6M)", top_accumulators, True)
-        _render_section("Top sellers (6M)", top_sellers, False)
-
-        def _top_shareholder_key(entry: dict[str, Any]) -> float:
-            shares = entry.get("shares_held")
-            if isinstance(shares, (int, float)) and not pd.isna(shares):
-                return float(shares)
-            return abs(entry.get("net_activity", 0) or 0)
-
-        top_investors = sorted(activity_entries, key=_top_shareholder_key, reverse=True)[:3]
-
-        if top_investors:
-            tk.Label(
-                info_panel,
-                text="Top investors (6M)",
-                font=("Arial", 11, "bold"),
-                bg="#f5f5f5",
-                anchor="w",
-            ).pack(fill="x", padx=4, pady=(10, 2))
-
-            table_frame = tk.Frame(info_panel, bg="#f5f5f5")
-            table_frame.pack(fill="x", padx=2, pady=(4, 0))
-
-            headers = (
-                ("Investor", "w"),
-                ("Shares Held", "e"),
-                ("Share Change (%)", "e"),
-                ("Est. Buy/Sell ($M)", "e"),
-            )
-
-            for col, (label, anchor) in enumerate(headers):
-                tk.Label(
-                    table_frame,
-                    text=label,
-                    font=("Arial", 10, "bold"),
-                    bg="#f5f5f5",
-                    anchor=anchor,
-                ).grid(row=0, column=col, sticky=anchor, padx=2, pady=(0, 4))
-
-            table_frame.grid_columnconfigure(0, weight=1)
-
-            for row_index, entry in enumerate(top_investors, start=1):
-                organization = entry.get("organization", "Unknown")
-                shares_held = entry.get("shares_held")
-                share_change_pct = entry.get("share_change_pct")
-                net_shares = entry.get("net_activity", 0) or 0
-
-                try:
-                    net_shares = float(net_shares)
-                except (TypeError, ValueError):
-                    net_shares = 0.0
-
-                est_net_dollars: Optional[float]
-                if close_price_value is not None:
-                    est_net_dollars = net_shares * close_price_value
-                else:
-                    est_net_dollars = None
-
-                if shares_held is None or (isinstance(shares_held, float) and pd.isna(shares_held)):
-                    shares_text = "N/A"
-                else:
-                    shares_text = _format_share_amount(float(shares_held))
-
-                if share_change_pct is None or (
-                    isinstance(share_change_pct, float) and pd.isna(share_change_pct)
-                ):
-                    change_text = "N/A"
-                    change_color = "#555555"
-                else:
-                    change_text = _format_percent(float(share_change_pct), signed=True)
-                    change_color = "green" if share_change_pct > 0 else "red" if share_change_pct < 0 else "#555555"
-
-                if est_net_dollars is None:
-                    estimated_text = "N/A"
-                    estimated_color = "#555555"
-                else:
-                    est_millions = est_net_dollars / 1_000_000
-                    estimated_text = f"{est_millions:+.2f}M"
-                    estimated_color = "green" if est_millions > 0 else "red" if est_millions < 0 else "#555555"
-
-                tk.Label(
-                    table_frame,
-                    text=organization,
-                    font=("Arial", 10),
-                    bg="#f5f5f5",
-                    anchor="w",
-                    justify="left",
-                    wraplength=240,
-                ).grid(row=row_index, column=0, sticky="w", padx=2, pady=2)
-
-                tk.Label(
-                    table_frame,
-                    text=shares_text,
-                    font=("Arial", 10),
-                    bg="#f5f5f5",
-                    anchor="e",
-                ).grid(row=row_index, column=1, sticky="e", padx=2, pady=2)
-
-                tk.Label(
-                    table_frame,
-                    text=change_text,
-                    font=("Arial", 10),
-                    fg=change_color,
-                    bg="#f5f5f5",
-                    anchor="e",
-                ).grid(row=row_index, column=2, sticky="e", padx=2, pady=2)
-
-                tk.Label(
-                    table_frame,
-                    text=estimated_text,
-                    font=("Arial", 10),
-                    fg=estimated_color,
-                    bg="#f5f5f5",
-                    anchor="e",
-                ).grid(row=row_index, column=3, sticky="e", padx=2, pady=2)
 
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
