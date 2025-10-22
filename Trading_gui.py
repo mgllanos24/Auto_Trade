@@ -179,6 +179,37 @@ def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
         return str(value)
 
 
+def _derive_signal(
+    mfi_value: Optional[float], rsi_value: Optional[float]
+) -> tuple[str, str]:
+    metrics: list[float] = []
+    for raw in (mfi_value, rsi_value):
+        if raw is None:
+            continue
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(numeric):
+            continue
+        metrics.append(numeric)
+
+    if not metrics:
+        return "⚪", "Neutral"
+
+    if any(value >= 65 for value in metrics):
+        return "🟢", "Bullish"
+    if any(value <= 35 for value in metrics):
+        return "🔴", "Bearish"
+
+    average = sum(metrics) / len(metrics)
+    if average >= 55:
+        return "⚪", "Neutral-Bullish"
+    if average <= 45:
+        return "⚪", "Neutral-Bearish"
+    return "⚪", "Neutral"
+
+
 def _coerce_float(value: Any) -> Optional[float]:
     """Attempt to coerce Yahoo Finance numeric payloads into floats."""
 
@@ -289,6 +320,40 @@ def accumulation_distribution(df: pd.DataFrame) -> pd.Series:
     clv = ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / (df["High"] - df["Low"])
     clv = clv.replace([np.inf, -np.inf], 0.0).fillna(0.0)
     return (clv * df["Volume"]).cumsum()
+
+
+def relative_strength_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate the RSI for the provided OHLC dataframe."""
+
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
+
+    avg_gain = avg_gain.fillna(method="bfill")
+    avg_loss = avg_loss.fillna(method="bfill")
+
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.fillna(50.0)
+
+
+def on_balance_volume(df: pd.DataFrame) -> pd.Series:
+    """Compute the On-Balance Volume (OBV) for the provided dataframe."""
+
+    obv = [0.0]
+    closes = df["Close"].to_numpy(dtype=float)
+    volumes = df["Volume"].to_numpy(dtype=float)
+    for idx in range(1, len(df)):
+        if closes[idx] > closes[idx - 1]:
+            obv.append(obv[-1] + volumes[idx])
+        elif closes[idx] < closes[idx - 1]:
+            obv.append(obv[-1] - volumes[idx])
+        else:
+            obv.append(obv[-1])
+    return pd.Series(obv, index=df.index)
 
 
 def slope(series: pd.Series, lookback: int = 60) -> float:
@@ -440,17 +505,42 @@ def fetch_institution_snapshot(
 
     close_price = float(ohlcv["Close"].iloc[-1])
 
+    rsi_14 = relative_strength_index(ohlcv, period=14).iloc[-1]
+    obv_series = on_balance_volume(ohlcv)
+    obv_lookback = min(len(obv_series), 30)
+    obv_slope_30 = slope(obv_series, lookback=obv_lookback) if obv_lookback >= 2 else float("nan")
+    if math.isnan(obv_slope_30):
+        obv_trend = "→"
+    elif obv_slope_30 > 0:
+        obv_trend = "↑"
+    elif obv_slope_30 < 0:
+        obv_trend = "↓"
+    else:
+        obv_trend = "→"
+
+    volume_avg_30 = float("nan")
+    if len(ohlcv) >= 5:
+        volume_avg_30 = float(ohlcv["Volume"].tail(30).mean())
+
     inst_summary = {
         "close": round(close_price, 2),
         "mfi_14": round(float(mfi_14), 2) if not math.isnan(float(mfi_14)) else float("nan"),
+        "rsi_14": round(float(rsi_14), 2) if not math.isnan(float(rsi_14)) else float("nan"),
         "ad_slope_60": round(float(ad_slope_60), 2) if not math.isnan(ad_slope_60) else float("nan"),
         "price_chg_21d_pct": round(float(price_change_21d), 2)
         if not math.isnan(price_change_21d)
         else float("nan"),
+        "volume_avg_30": round(float(volume_avg_30), 2) if not math.isnan(volume_avg_30) else float("nan"),
+        "obv_trend": obv_trend,
+        "obv_slope_30": round(float(obv_slope_30), 4) if not math.isnan(obv_slope_30) else float("nan"),
         "inst_count": float("nan"),
         "inst_shares_sum": float("nan"),
         "inst_latest_report": None,
         "pct_held_by_institutions": float("nan"),
+        "beta": float("nan"),
+        "top_holders": [],
+        "insider_buys_3m": None,
+        "insider_sells_3m": None,
     }
 
     try:
@@ -468,12 +558,86 @@ def fetch_institution_snapshot(
                         inst_summary["inst_latest_report"] = latest.to_pydatetime()
                     break
 
+            top_holders: list[dict[str, Any]] = []
+            normalized_columns = {str(col).strip().lower(): col for col in holders.columns}
+            holder_col = normalized_columns.get("holder") or normalized_columns.get("name")
+            pct_columns = [
+                col
+                for key, col in normalized_columns.items()
+                if any(token in key for token in ("pct", "%", "percent"))
+            ]
+            for _, row in holders.head(3).iterrows():
+                holder_name = None
+                if holder_col:
+                    holder_name = row.get(holder_col)
+                if holder_name is None:
+                    for candidate in ("Holder", "holder", "Name", "name"):
+                        if candidate in row.index:
+                            holder_name = row.get(candidate)
+                            if holder_name is not None:
+                                break
+                pct_value: Optional[float] = None
+                for pct_col in pct_columns:
+                    raw_pct = row.get(pct_col)
+                    numeric_pct = _coerce_float(raw_pct)
+                    if numeric_pct is None:
+                        continue
+                    if abs(numeric_pct) <= 1:
+                        numeric_pct *= 100.0
+                    pct_value = float(numeric_pct)
+                    break
+                if holder_name is None and pct_value is None:
+                    continue
+                top_holders.append(
+                    {
+                        "name": holder_name or "Unknown",
+                        "pct": pct_value,
+                    }
+                )
+            inst_summary["top_holders"] = top_holders
+
         major = ticker.get_major_holders()
         if isinstance(major, pd.DataFrame) and not major.empty:
             major.columns = ["metric", "value"]
             mask = major["metric"].str.contains("Institutions", case=False, na=False)
             if mask.any():
                 inst_summary["pct_held_by_institutions"] = float(major.loc[mask, "value"].iloc[0])
+
+        try:
+            fast_info = ticker.fast_info
+        except Exception:
+            fast_info = None
+        beta_candidate = None
+        if fast_info is not None:
+            beta_candidate = getattr(fast_info, "beta", None)
+            if beta_candidate is None and isinstance(fast_info, dict):
+                beta_candidate = fast_info.get("beta")
+        if beta_candidate is None:
+            try:
+                info = ticker.get_info()
+            except Exception:
+                info = {}
+            beta_candidate = info.get("beta") if isinstance(info, dict) else None
+        beta_numeric = _coerce_float(beta_candidate)
+        if beta_numeric is not None:
+            inst_summary["beta"] = float(beta_numeric)
+
+        try:
+            insider_df = ticker.insider_transactions
+        except Exception:
+            insider_df = None
+        if isinstance(insider_df, pd.DataFrame) and not insider_df.empty:
+            if "Date" in insider_df.columns and "Transaction" in insider_df.columns:
+                parsed_dates = pd.to_datetime(insider_df["Date"], errors="coerce")
+                recent_cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=90)
+                recent_mask = parsed_dates >= recent_cutoff
+                if recent_mask.any():
+                    recent = insider_df.loc[recent_mask]
+                    transactions = recent["Transaction"].astype(str).str.lower()
+                    buys = int(transactions.str.contains("buy", na=False).sum())
+                    sells = int(transactions.str.contains("sell", na=False).sum())
+                    inst_summary["insider_buys_3m"] = buys
+                    inst_summary["insider_sells_3m"] = sells
     except Exception as exc:  # pragma: no cover - network
         return inst_summary, f"Unable to load institutional snapshot ({exc})."
 
@@ -819,60 +983,86 @@ def show_candlestick():
         bg="#f5f5f5",
     ).pack(fill="x")
 
+    summary_frame = tk.Frame(info_panel, bg="#f5f5f5")
+    summary_frame.pack(fill="x", padx=4, pady=(2, 4))
+
     tk.Label(
-        info_panel,
+        summary_frame,
         text=f"Symbol: {sym}",
         font=("Arial", 11),
         anchor="w",
         bg="#f5f5f5",
-    ).pack(fill="x", padx=4, pady=(2, 4))
+    ).pack(side="left")
+
+    last_close_value = snapshot_summary.get("close") if snapshot_summary else None
+    tk.Label(
+        summary_frame,
+        text=f"   |   Last Close: {_format_price(last_close_value)}",
+        font=("Arial", 11),
+        anchor="w",
+        bg="#f5f5f5",
+    ).pack(side="left")
+
+    price_change = snapshot_summary.get("price_chg_21d_pct") if snapshot_summary else None
+    change_value = (
+        price_change
+        if isinstance(price_change, (int, float)) and not pd.isna(price_change)
+        else None
+    )
+    if change_value is None or change_value == 0:
+        change_color = "#333333"
+    elif change_value > 0:
+        change_color = "green"
+    else:
+        change_color = "red"
+
+    tk.Label(
+        summary_frame,
+        text=f"   |   21-Day Change: {_format_percent(price_change, signed=True)}",
+        font=("Arial", 11),
+        anchor="w",
+        bg="#f5f5f5",
+        fg=change_color,
+    ).pack(side="left")
 
     content_pad = {"fill": "x", "anchor": "w", "padx": 4, "pady": 2}
 
     if snapshot_summary:
         tk.Label(
             info_panel,
-            text=f"Last close: {_format_price(snapshot_summary.get('close'))}",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
+            text="📊 Technical Summary",
+            font=("Arial", 11, "bold"),
             anchor="w",
-        ).pack(**content_pad)
+            bg="#f5f5f5",
+        ).pack(fill="x", padx=4, pady=(0, 2))
 
-        price_change = snapshot_summary.get("price_chg_21d_pct")
-        change_value = (
-            price_change
-            if isinstance(price_change, (int, float)) and not pd.isna(price_change)
-            else None
-        )
-        if change_value is None or change_value == 0:
-            change_color = "#333333"
-        elif change_value > 0:
-            change_color = "green"
+        mfi_text = _format_decimal(snapshot_summary.get("mfi_14"))
+        rsi_text = _format_decimal(snapshot_summary.get("rsi_14"))
+        ad_text = _format_decimal(snapshot_summary.get("ad_slope_60"))
+        obv_trend = snapshot_summary.get("obv_trend") or "→"
+        volume_value = snapshot_summary.get("volume_avg_30")
+        if volume_value is None or (
+            isinstance(volume_value, (int, float)) and math.isnan(volume_value)
+        ):
+            volume_text = "N/A"
         else:
-            change_color = "red"
-        tk.Label(
-            info_panel,
-            text=f"21-day change: {_format_percent(price_change, signed=True)}",
-            justify="left",
-            wraplength=240,
-            fg=change_color,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
+            volume_text = _format_share_amount(volume_value)
+        beta_text = _format_decimal(snapshot_summary.get("beta"))
+        signal_icon, signal_description = _derive_signal(
+            snapshot_summary.get("mfi_14"), snapshot_summary.get("rsi_14")
+        )
+        pattern_display = pattern_name or "N/A"
+
+        technical_text = (
+            f"MFI (14): {mfi_text}      RSI (14): {rsi_text}\n"
+            f"A/D Slope (60): {ad_text}      OBV Trend: {obv_trend}\n"
+            f"Volume (30D Avg): {volume_text}      Beta: {beta_text}\n"
+            f"Pattern: {pattern_display}      Signal: {signal_icon} {signal_description}"
+        )
 
         tk.Label(
             info_panel,
-            text=f"MFI (14): {_format_decimal(snapshot_summary.get('mfi_14'))}",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
-            anchor="w",
-        ).pack(**content_pad)
-
-        tk.Label(
-            info_panel,
-            text=f"A/D slope (60): {_format_decimal(snapshot_summary.get('ad_slope_60'))}",
+            text=technical_text,
             justify="left",
             wraplength=240,
             bg="#f5f5f5",
@@ -881,16 +1071,33 @@ def show_candlestick():
 
         tk.Label(
             info_panel,
-            text=f"Institutional filers: {_format_int(snapshot_summary.get('inst_count'))}",
-            justify="left",
-            wraplength=240,
-            bg="#f5f5f5",
+            text="🏦 Institutional Snapshot",
+            font=("Arial", 11, "bold"),
             anchor="w",
-        ).pack(**content_pad)
+            bg="#f5f5f5",
+        ).pack(fill="x", padx=4, pady=(6, 2))
 
+        filers_text = _format_int(snapshot_summary.get("inst_count"))
+        shares_text = _format_shares(snapshot_summary.get("inst_shares_sum"))
+        pct_text = _format_percent(snapshot_summary.get("pct_held_by_institutions"))
+
+        share_change_values: list[float] = []
+        for entry in activity_entries:
+            value = entry.get("share_change_pct")
+            if isinstance(value, (int, float)) and not pd.isna(value):
+                share_change_values.append(float(value))
+        qoq_change = float("nan")
+        if share_change_values:
+            qoq_change = sum(share_change_values) / len(share_change_values)
+        qoq_text = _format_percent(qoq_change, signed=True)
+
+        snapshot_lines = (
+            f"Filers: {filers_text}      Shares Held: {shares_text}\n"
+            f"Institutional %: {pct_text}      QoQ Change: {qoq_text}"
+        )
         tk.Label(
             info_panel,
-            text=f"Institutional shares: {_format_shares(snapshot_summary.get('inst_shares_sum'))}",
+            text=snapshot_lines,
             justify="left",
             wraplength=240,
             bg="#f5f5f5",
@@ -912,14 +1119,57 @@ def show_candlestick():
             anchor="w",
         ).pack(**content_pad)
 
+        insider_buys = snapshot_summary.get("insider_buys_3m")
+        insider_sells = snapshot_summary.get("insider_sells_3m")
+
+        if isinstance(insider_buys, (int, float)) and not pd.isna(insider_buys):
+            insider_buys_text = f"{int(insider_buys):+d}" if insider_buys else "0"
+        elif insider_buys is None:
+            insider_buys_text = "N/A"
+        else:
+            insider_buys_text = str(insider_buys)
+
+        if isinstance(insider_sells, (int, float)) and not pd.isna(insider_sells):
+            insider_sells_text = f"{int(insider_sells)}"
+        elif insider_sells is None:
+            insider_sells_text = "N/A"
+        else:
+            insider_sells_text = str(insider_sells)
+
         tk.Label(
             info_panel,
-            text=f"% held by institutions: {_format_percent(snapshot_summary.get('pct_held_by_institutions'))}",
+            text=f"Insider Buys (3M): {insider_buys_text}      Insider Sells: {insider_sells_text}",
             justify="left",
             wraplength=240,
             bg="#f5f5f5",
             anchor="w",
         ).pack(**content_pad)
+
+        top_holders = snapshot_summary.get("top_holders") or []
+        if top_holders:
+            tk.Label(
+                info_panel,
+                text="Top Holders:",
+                font=("Arial", 10, "bold"),
+                anchor="w",
+                bg="#f5f5f5",
+            ).pack(fill="x", padx=6, pady=(4, 0))
+
+            for holder in top_holders:
+                holder_name = holder.get("name", "Unknown")
+                pct_value = holder.get("pct")
+                if isinstance(pct_value, (int, float)) and not math.isnan(pct_value):
+                    holder_text = f"  - {holder_name} ({pct_value:.1f}%)"
+                else:
+                    holder_text = f"  - {holder_name}"
+                tk.Label(
+                    info_panel,
+                    text=holder_text,
+                    justify="left",
+                    wraplength=240,
+                    bg="#f5f5f5",
+                    anchor="w",
+                ).pack(fill="x", padx=6, pady=(0, 2))
 
     if snapshot_error:
         tk.Label(
