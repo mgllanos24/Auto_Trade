@@ -1129,9 +1129,51 @@ def show_candlestick():
 
     snapshot_summary, snapshot_error = fetch_institution_snapshot(sym, df)
 
-    info_panel = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
-    info_panel.pack(side="left", fill="y", padx=(0, 10), pady=5)
-    info_panel.pack_propagate(False)
+    info_container = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
+    info_container.pack(side="left", fill="y", padx=(0, 10), pady=5)
+    info_container.pack_propagate(False)
+
+    info_canvas = tk.Canvas(info_container, bg="#f5f5f5", highlightthickness=0)
+    info_canvas.pack(side="left", fill="both", expand=True)
+
+    info_scrollbar = ttk.Scrollbar(info_container, orient="vertical", command=info_canvas.yview)
+    info_scrollbar.pack(side="right", fill="y")
+
+    info_canvas.configure(yscrollcommand=info_scrollbar.set)
+
+    info_panel = tk.Frame(info_canvas, bg="#f5f5f5")
+    info_window = info_canvas.create_window((0, 0), window=info_panel, anchor="nw")
+
+    def _configure_scroll_region(event=None):
+        info_canvas.configure(scrollregion=info_canvas.bbox("all"))
+
+    def _sync_panel_width(event):
+        info_canvas.itemconfigure(info_window, width=event.width)
+        _configure_scroll_region()
+
+    info_panel.bind("<Configure>", _configure_scroll_region)
+    info_canvas.bind("<Configure>", _sync_panel_width)
+
+    def _on_mousewheel(event):
+        if event.delta:
+            info_canvas.yview_scroll(int(-event.delta / 120), "units")
+        elif event.num == 4:
+            info_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            info_canvas.yview_scroll(1, "units")
+
+    def _bind_mousewheel(_):
+        info_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        info_canvas.bind_all("<Button-4>", _on_mousewheel)
+        info_canvas.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind_mousewheel(_):
+        info_canvas.unbind_all("<MouseWheel>")
+        info_canvas.unbind_all("<Button-4>")
+        info_canvas.unbind_all("<Button-5>")
+
+    info_canvas.bind("<Enter>", _bind_mousewheel)
+    info_canvas.bind("<Leave>", _unbind_mousewheel)
 
     tk.Label(
         info_panel,
