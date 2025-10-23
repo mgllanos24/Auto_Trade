@@ -196,6 +196,26 @@ def _format_decimal(value: Optional[float], *, decimals: int = 2) -> str:
         return str(value)
 
 
+def _nice_tick_size(value: float, *, default: float = 1.0) -> float:
+    if not value or not math.isfinite(value):
+        return default
+
+    value = abs(value)
+    exponent = math.floor(math.log10(value))
+    fraction = value / (10 ** exponent)
+
+    if fraction <= 1:
+        nice_fraction = 1
+    elif fraction <= 2:
+        nice_fraction = 2
+    elif fraction <= 5:
+        nice_fraction = 5
+    else:
+        nice_fraction = 10
+
+    return nice_fraction * (10 ** exponent)
+
+
 def _derive_signal(
     mfi_value: Optional[float], rsi_value: Optional[float]
 ) -> tuple[str, str]:
@@ -1441,18 +1461,36 @@ def show_candlestick():
     plot_df['Date'] = mdates.date2num(plot_df.index.to_pydatetime())
     ohlc = plot_df[['Date', 'Open', 'High', 'Low', 'Close']].values
 
-    price_min = plot_df['Low'].min()
-    price_max = plot_df['High'].max()
-    price_range = price_max - price_min
+    data_price_min = float(plot_df['Low'].min())
+    data_price_max = float(plot_df['High'].max())
+    price_range = data_price_max - data_price_min
 
     if price_range == 0:
-        price_range = max(price_max * 0.01, 0.5)
+        reference = data_price_max if data_price_max else 1.0
+        price_range = max(reference * 0.01, 0.5)
+
+    tick_hint = price_range / 6 if price_range > 0 else 1.0
+    tick_size = _nice_tick_size(tick_hint, default=1.0)
+
+    price_min = math.floor(data_price_min / tick_size) * tick_size
+    price_max = math.ceil(data_price_max / tick_size) * tick_size
+
+    if price_max <= data_price_max:
+        price_max += tick_size
+
+    if data_price_min - price_min < 0.25 * tick_size:
+        price_min -= tick_size
+
+    if price_min < 0 < data_price_min:
+        price_min = 0.0
+
+    display_range = max(price_max - price_min, price_range)
 
     target_bins = 60
-    bin_size = max(price_range / target_bins, 0.01)
+    bin_size = max(display_range / target_bins, 0.01)
 
     bins = np.arange(price_min, price_max + bin_size, bin_size)
-    if bins[-1] < price_max:
+    if bins[-1] < price_max - 1e-9:
         bins = np.append(bins, price_max)
 
     price_levels = 0.5 * (bins[1:] + bins[:-1])
@@ -1503,13 +1541,14 @@ def show_candlestick():
     norm_denominator = volume_by_price.max()
     norm_vol = volume_by_price / norm_denominator if norm_denominator else volume_by_price
 
-    fig = plt.figure(figsize=(12, 6))
-    gs = fig.add_gridspec(3, 2, width_ratios=[20, 5], height_ratios=[3, 1, 1], hspace=0.05, wspace=0.05)
+    fig = plt.figure(figsize=(14, 6.5))
+    gs = fig.add_gridspec(3, 2, width_ratios=[26, 6], height_ratios=[3, 1, 1], hspace=0.05, wspace=0.04)
 
     ax_price = fig.add_subplot(gs[0, 0])
     ax_volume = fig.add_subplot(gs[1, 0], sharex=ax_price)
     ax_rsi = fig.add_subplot(gs[2, 0], sharex=ax_price)
     ax_vp = fig.add_subplot(gs[0, 1], sharey=ax_price)
+    fig.subplots_adjust(left=0.06, right=0.98)
     for row in (1, 2):
         fig.add_subplot(gs[row, 1]).axis('off')
 
@@ -1517,6 +1556,8 @@ def show_candlestick():
         color = 'green' if c >= o else 'red'
         ax_price.plot([t, t], [l, h], color='black')
         ax_price.add_patch(plt.Rectangle((t - 0.2, min(o, c)), 0.4, abs(c - o), color=color))
+
+    ax_price.set_ylim(price_min, price_max)
 
     overlay_added = False
 
@@ -1849,6 +1890,10 @@ def show_candlestick():
     ax_price.set_title(chart_title)
     ax_price.yaxis.set_label_position('right')
     ax_price.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
+
+    left_price_axis = ax_price.secondary_yaxis('left', functions=(lambda y: y, lambda y: y))
+    left_price_axis.set_ylabel('Price')
+    left_price_axis.tick_params(axis='y', labelleft=True, left=True)
 
     canvas = FigureCanvasTkAgg(fig, master=canvas_container)
     canvas.draw()
