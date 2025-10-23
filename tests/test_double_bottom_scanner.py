@@ -131,3 +131,72 @@ def test_scan_double_bottoms_volume_contraction_requirement():
     )
 
     assert hits == []
+
+
+def test_scan_double_bottoms_filters_out_stale_patterns():
+    pattern_section = [
+        100,
+        98,
+        96,
+        94,
+        90,
+        92,
+        94,
+        96,
+        97,
+        98,
+        96,
+        94,
+        92,
+        90.5,
+        90,
+        92,
+        95,
+        99,
+    ]
+    trailing_section = [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+    ]
+    lows = pattern_section + trailing_section
+    volumes = [1_000_000] * len(lows)
+    df = _make_ohlcv(lows, volumes)
+
+    stale_hits = scan_double_bottoms(
+        df,
+        window=len(df),
+        tolerance=0.05,
+        min_bounce=0.05,
+        require_breakout=False,
+    )
+
+    assert stale_hits == []
+
+    permissive_hits = scan_double_bottoms(
+        df,
+        window=len(df),
+        tolerance=0.05,
+        min_bounce=0.05,
+        require_breakout=False,
+        max_pattern_age=None,
+    )
+
+    assert permissive_hits, "Disabling the age filter should surface the pattern"
