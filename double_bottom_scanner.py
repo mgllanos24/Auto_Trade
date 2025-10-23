@@ -107,11 +107,16 @@ def scan_double_bottoms(
     min_bounce: float = 0.05,
     require_breakout: bool = True,
     require_volume_contraction: bool = False,
+    max_pattern_age: Optional[int] = 10,
 ) -> List[DoubleBottomHit]:
     """Scan a dataframe for double bottom patterns.
 
     Parameters mirror :func:`ascending_triangle_scanner.scan_ascending_triangles`
-    while adapting the heuristics to the double bottom setup.
+    while adapting the heuristics to the double bottom setup.  ``max_pattern_age``
+    limits how far back in time a detected setup may occur.  By default only
+    patterns whose most recent event (breakout or right bottom) happened within
+    the last ten bars are reported which keeps results focused on actionable,
+    current signals.  Pass ``None`` to disable this filter.
     """
 
     if df is None or df.empty:
@@ -126,6 +131,9 @@ def scan_double_bottoms(
         window = n_rows
     window = min(window, n_rows)
     step = max(step, 1)
+
+    if max_pattern_age is not None and max_pattern_age < 0:
+        raise ValueError("max_pattern_age must be non-negative or None")
 
     hits: List[DoubleBottomHit] = []
     for start in range(0, n_rows - window + 1, step):
@@ -199,6 +207,19 @@ def scan_double_bottoms(
 
             if require_breakout and not breakout:
                 continue
+
+            if breakout:
+                most_recent_idx = breakout_idx
+            else:
+                most_recent_idx = start + right
+
+            if most_recent_idx is None:
+                continue
+
+            if max_pattern_age is not None:
+                age = (n_rows - 1) - most_recent_idx
+                if age > max_pattern_age:
+                    continue
 
             lookback = max(separation, 1)
             pre_slice = segment["volume"].iloc[max(0, left - lookback) : left]
