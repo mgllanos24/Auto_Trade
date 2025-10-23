@@ -1510,13 +1510,14 @@ def show_candlestick():
     norm_denominator = volume_by_price.max()
     norm_vol = volume_by_price / norm_denominator if norm_denominator else volume_by_price
 
-    fig = plt.figure(figsize=(12, 6))
-    gs = fig.add_gridspec(3, 2, width_ratios=[20, 5], height_ratios=[3, 1, 1], hspace=0.05, wspace=0.05)
+    fig = plt.figure(figsize=(14, 6.5))
+    gs = fig.add_gridspec(3, 2, width_ratios=[26, 6], height_ratios=[3, 1, 1], hspace=0.05, wspace=0.04)
 
     ax_price = fig.add_subplot(gs[0, 0])
     ax_volume = fig.add_subplot(gs[1, 0], sharex=ax_price)
     ax_rsi = fig.add_subplot(gs[2, 0], sharex=ax_price)
     ax_vp = fig.add_subplot(gs[0, 1], sharey=ax_price)
+    fig.subplots_adjust(left=0.06, right=0.98)
     for row in (1, 2):
         fig.add_subplot(gs[row, 1]).axis('off')
 
@@ -1856,6 +1857,10 @@ def show_candlestick():
     ax_price.set_title(chart_title)
     ax_price.yaxis.set_label_position('right')
     ax_price.tick_params(axis='y', labelright=True, right=True, labelleft=False, left=False)
+
+    left_price_axis = ax_price.secondary_yaxis('left', functions=(lambda y: y, lambda y: y))
+    left_price_axis.set_ylabel('Price')
+    left_price_axis.tick_params(axis='y', labelleft=True, left=True)
 
     canvas = FigureCanvasTkAgg(fig, master=canvas_container)
     canvas.draw()
