@@ -1156,7 +1156,11 @@ def show_candlestick():
 
     def _on_mousewheel(event):
         if event.delta:
-            info_canvas.yview_scroll(int(-event.delta / 120), "units")
+            if sys.platform == "darwin":
+                step = -1 if event.delta > 0 else 1
+            else:
+                step = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+            info_canvas.yview_scroll(step, "units")
         elif event.num == 4:
             info_canvas.yview_scroll(-1, "units")
         elif event.num == 5:
@@ -1174,10 +1178,13 @@ def show_candlestick():
 
     info_canvas.bind("<Enter>", _bind_mousewheel)
     info_canvas.bind("<Leave>", _unbind_mousewheel)
+    info_panel.bind("<Enter>", _bind_mousewheel)
+    info_panel.bind("<Leave>", _unbind_mousewheel)
+    info_canvas.yview_moveto(0)
 
     tk.Label(
         info_panel,
-        text="Institutional Activity",
+        text="Symbol Overview",
         font=("Arial", 12, "bold"),
         anchor="w",
         bg="#f5f5f5",
