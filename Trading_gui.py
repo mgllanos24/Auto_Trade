@@ -2559,11 +2559,24 @@ def show_candlestick():
 
     bar_positions = bins[:-1]
     bar_heights = np.diff(bins)
-    ax_vp.barh(bar_positions, norm_vol.values, height=bar_heights, align='edge', color='gray')
+    ax_vp.barh(
+        bar_positions,
+        norm_vol.values,
+        height=bar_heights,
+        align='edge',
+        color='#8a8a8a',
+        alpha=0.8,
+    )
     ax_vp.set_ylim(price_min, price_max)
+    vp_max = float(norm_vol.max()) if norm_vol.size else 0.0
+    if not np.isfinite(vp_max) or vp_max <= 0:
+        vp_max = 1.0
+    ax_vp.set_xlim(0, vp_max * 1.05)
+    ax_vp.invert_xaxis()
     ax_vp.set_xticks([])
     ax_vp.set_xlabel('Volume')
     ax_vp.tick_params(axis='y', labelleft=False, left=False, labelright=False, right=False)
+    ax_vp.spines['left'].set_visible(False)
 
     volume_colors = ['green' if c >= o else 'red' for o, c in zip(plot_df['Open'], plot_df['Close'])]
     ax_volume.bar(plot_df['Date'], plot_df['Volume'], width=0.6, color=volume_colors, align='center')
