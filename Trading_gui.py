@@ -178,6 +178,9 @@ def _coerce_numeric(value: Any) -> Optional[float]:
         return None
 
 
+NA_TEXT_COLOR = "#5f6368"
+
+
 def _score_to_color(score: int) -> str:
     if score > 0:
         return "#0f9d58"
@@ -1891,6 +1894,8 @@ def show_candlestick():
 
                 fg_color = _score_to_color(score)
                 icon = _score_to_icon(score)
+                if isinstance(value_text, str) and value_text.strip().upper() in {"N/A", "NA"}:
+                    fg_color = NA_TEXT_COLOR
                 tk.Label(
                     row,
                     text=f"  {icon} {value_text}",
