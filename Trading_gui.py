@@ -79,7 +79,9 @@ symbol_data = {}
 _long_name_cache = {}
 _institution_activity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _institution_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_quote_summary_cache: dict[tuple[str, tuple[str, ...]], tuple[float, dict[str, Any]]] = {}
 INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
+QUOTE_SUMMARY_CACHE_TTL = 60 * 15  # 15 minutes
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
 
@@ -289,6 +291,48 @@ def _coerce_float(value: Any) -> Optional[float]:
             return None
 
     return None
+
+
+def _fetch_quote_summary(
+    symbol: str, modules: tuple[str, ...]
+) -> tuple[dict[str, Any], Optional[str]]:
+    """Fetch and cache Yahoo Finance quote summary data for the given modules."""
+
+    cache_key = (symbol, modules)
+    now = time.time()
+    cached = _quote_summary_cache.get(cache_key)
+    if cached and now - cached[0] < QUOTE_SUMMARY_CACHE_TTL:
+        return cached[1], None
+
+    module_param = ",".join(dict.fromkeys(modules))
+    url = (
+        f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules={module_param}"
+    )
+
+    try:
+        with urlopen(url) as response:
+            payload = json.load(response)
+    except URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return {}, f"Unable to load quote summary ({reason})."
+    except Exception as exc:  # pragma: no cover - defensive
+        return {}, f"Unable to load quote summary ({exc})."
+
+    try:
+        results = payload.get("quoteSummary", {}).get("result", [])
+        if not results:
+            error = payload.get("quoteSummary", {}).get("error")
+            if isinstance(error, dict):
+                message = error.get("description") or error.get("message")
+                if message:
+                    return {}, f"Unable to load quote summary ({message})."
+            return {}, "Unable to load quote summary."
+        summary = results[0]
+    except AttributeError:
+        return {}, "Unable to load quote summary."
+
+    _quote_summary_cache[cache_key] = (now, summary)
+    return summary, None
 
 
 def _normalise_report_date(raw: Any) -> str:
@@ -629,6 +673,176 @@ def fetch_institution_snapshot(
         "correlation": float("nan"),
         "atr_14": round(float(atr_value), 2) if not math.isnan(atr_value) else float("nan"),
     }
+
+    modules = (
+        "financialData",
+        "summaryDetail",
+        "defaultKeyStatistics",
+        "calendarEvents",
+        "recommendationTrend",
+        "assetProfile",
+        "price",
+    )
+    quote_summary, _ = _fetch_quote_summary(symbol, modules)
+    if quote_summary:
+        financial_data = quote_summary.get("financialData") or {}
+        summary_detail = quote_summary.get("summaryDetail") or {}
+        statistics = quote_summary.get("defaultKeyStatistics") or {}
+        calendar_events = quote_summary.get("calendarEvents") or {}
+        recommendation_trend = quote_summary.get("recommendationTrend") or {}
+        asset_profile = quote_summary.get("assetProfile") or {}
+        price_section = quote_summary.get("price") or {}
+
+        trailing_pe = _coerce_float(
+            statistics.get("trailingPE") or summary_detail.get("trailingPE")
+        )
+        if trailing_pe is not None:
+            inst_summary["pe_ttm"] = float(trailing_pe)
+
+        forward_pe = _coerce_float(
+            statistics.get("forwardPE") or summary_detail.get("forwardPE")
+        )
+        if forward_pe is not None:
+            inst_summary["forward_pe"] = float(forward_pe)
+
+        peg_ratio = _coerce_float(statistics.get("pegRatio") or financial_data.get("pegRatio"))
+        if peg_ratio is not None:
+            inst_summary["peg_ratio"] = float(peg_ratio)
+
+        dividend_yield = _coerce_float(summary_detail.get("dividendYield"))
+        if dividend_yield is not None:
+            if abs(dividend_yield) <= 1:
+                dividend_yield *= 100.0
+            inst_summary["dividend_yield_pct"] = float(dividend_yield)
+
+        roe_value = _coerce_float(financial_data.get("returnOnEquity"))
+        if roe_value is not None:
+            if abs(roe_value) <= 1:
+                roe_value *= 100.0
+            inst_summary["roe_pct"] = float(roe_value)
+
+        debt_to_equity = _coerce_float(
+            financial_data.get("debtToEquity") or statistics.get("debtToEquity")
+        )
+        if debt_to_equity is not None:
+            inst_summary["de_ratio"] = float(debt_to_equity)
+
+        eps_growth = _coerce_float(
+            financial_data.get("earningsQuarterlyGrowth")
+            or financial_data.get("earningsGrowth")
+        )
+        if eps_growth is not None:
+            if abs(eps_growth) <= 1:
+                eps_growth *= 100.0
+            inst_summary["eps_growth_yoy_pct"] = float(eps_growth)
+
+        revenue_growth = _coerce_float(financial_data.get("revenueGrowth"))
+        if revenue_growth is not None:
+            if abs(revenue_growth) <= 1:
+                revenue_growth *= 100.0
+            inst_summary["revenue_growth_yoy_pct"] = float(revenue_growth)
+
+        free_cash_flow = _coerce_float(
+            financial_data.get("freeCashflow") or financial_data.get("freeCashFlow")
+        )
+        if free_cash_flow is not None:
+            inst_summary["free_cash_flow"] = float(free_cash_flow)
+
+        target_price = _coerce_float(financial_data.get("targetMeanPrice"))
+        if target_price is None:
+            target_price = _coerce_float(financial_data.get("targetMedianPrice"))
+        if target_price is not None:
+            inst_summary["avg_target_price"] = float(target_price)
+            if close_price:
+                try:
+                    if close_price != 0:
+                        upside = (target_price - close_price) / close_price * 100.0
+                    else:
+                        upside = float("nan")
+                except Exception:  # pragma: no cover - defensive
+                    upside = float("nan")
+                if not math.isnan(upside):
+                    inst_summary["avg_target_upside_pct"] = float(upside)
+
+        short_interest = _coerce_float(
+            statistics.get("shortPercentOfFloat")
+            or summary_detail.get("shortPercentOfFloat")
+        )
+        if short_interest is not None:
+            if abs(short_interest) <= 1:
+                short_interest *= 100.0
+            inst_summary["short_interest_pct_float"] = float(short_interest)
+
+        beta_candidate = _coerce_float(
+            summary_detail.get("beta") or statistics.get("beta")
+        )
+        if beta_candidate is not None:
+            inst_summary["beta"] = float(beta_candidate)
+
+        recommendation_key = financial_data.get("recommendationKey")
+        if isinstance(recommendation_key, str) and recommendation_key.strip():
+            inst_summary["analyst_rating"] = recommendation_key.replace("_", " ").title()
+
+        if isinstance(recommendation_trend, dict):
+            trend_list = recommendation_trend.get("trend")
+        else:
+            trend_list = recommendation_trend
+        if isinstance(trend_list, list) and trend_list:
+            latest_trend = trend_list[0]
+
+            def _extract_trend_count(*keys: str) -> Optional[int]:
+                total = 0.0
+                found = False
+                for key in keys:
+                    if not isinstance(latest_trend, dict):
+                        break
+                    value = _coerce_float(latest_trend.get(key))
+                    if value is None:
+                        continue
+                    total += value
+                    found = True
+                if not found:
+                    return None
+                return int(round(total))
+
+            buy_count = _extract_trend_count("strongBuy", "buy")
+            hold_count = _extract_trend_count("hold")
+            sell_count = _extract_trend_count("strongSell", "sell")
+
+            if buy_count is not None:
+                inst_summary["analyst_buy_count"] = buy_count
+            if hold_count is not None:
+                inst_summary["analyst_hold_count"] = hold_count
+            if sell_count is not None:
+                inst_summary["analyst_sell_count"] = sell_count
+
+        earnings_info = calendar_events.get("earnings") if isinstance(calendar_events, dict) else {}
+        earnings_dates = []
+        if isinstance(earnings_info, dict):
+            earnings_dates = earnings_info.get("earningsDate") or []
+        if not isinstance(earnings_dates, list):
+            earnings_dates = [earnings_dates]
+        for entry in earnings_dates:
+            candidate = None
+            if isinstance(entry, dict):
+                candidate = _parse_report_datetime(entry.get("raw"))
+                if candidate is None:
+                    candidate = _parse_report_datetime(entry.get("fmt"))
+            else:
+                candidate = _parse_report_datetime(entry)
+            if candidate is not None:
+                inst_summary["next_earnings"] = candidate
+                break
+
+        sector_name = None
+        if isinstance(asset_profile, dict):
+            sector_name = asset_profile.get("sector")
+        if not sector_name and isinstance(price_section, dict):
+            sector_name = price_section.get("sector")
+        if isinstance(sector_name, str) and sector_name.strip():
+            cleaned_sector = sector_name.strip()
+            inst_summary["sector"] = cleaned_sector
+            inst_summary["sector_etf"] = SECTOR_ETF_MAP.get(cleaned_sector)
 
     try:
         ticker = yf.Ticker(symbol)
