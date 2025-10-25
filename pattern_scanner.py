@@ -6,7 +6,7 @@ import csv
 import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
@@ -50,6 +50,8 @@ def _resolve_data_dir() -> Path:
 
 
 DATA_DIR = _resolve_data_dir()
+CACHE_DIR = DATA_DIR / "yf_cache"
+CACHE_TTL = timedelta(minutes=30)
 
 
 def _resolve_watchlist_path() -> Path:
@@ -283,7 +285,53 @@ def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
     return pd.DataFrame([hit.__dict__ for hit in hits])
 
 
+def _cache_path_for(symbol: str) -> Path:
+    normalized = ''.join(ch if ch.isalnum() else '_' for ch in symbol.upper())
+    return CACHE_DIR / f"{normalized}.csv"
+
+
+def _load_cached_data(symbol: str, *, ignore_ttl: bool = False) -> Optional[pd.DataFrame]:
+    path = _cache_path_for(symbol)
+    if not path.exists():
+        return None
+
+    if not ignore_ttl:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if datetime.now(timezone.utc) - modified > CACHE_TTL:
+            return None
+
+    try:
+        df = pd.read_csv(path, index_col='Date')
+    except Exception as exc:
+        print(f" Failed to load cache for {symbol}: {exc}")
+        return None
+
+    if df.empty:
+        return None
+
+    required = ['open', 'high', 'low', 'close', 'volume']
+    if not set(required).issubset(df.columns):
+        return None
+
+    df.index = pd.to_datetime(df.index, utc=True, errors='coerce')
+    df = df[required].dropna()
+    return df if not df.empty else None
+
+
+def _store_cached_data(symbol: str, df: pd.DataFrame) -> None:
+    path = _cache_path_for(symbol)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index_label='Date')
+    except Exception as exc:
+        print(f" Failed to write cache for {symbol}: {exc}")
+
+
 def get_yf_data(symbol):
+    cached = _load_cached_data(symbol)
+    if cached is not None:
+        return cached
+
     try:
         raw = yf.download(
             symbol,
@@ -294,16 +342,25 @@ def get_yf_data(symbol):
         )
     except Exception as exc:
         print(f" Error downloading {symbol}: {exc}")
+        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        if fallback is not None:
+            return fallback
         return pd.DataFrame()
 
     if raw is None or raw.empty:
         print(f" No data returned for {symbol}")
+        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        if fallback is not None:
+            return fallback
         return pd.DataFrame()
 
     df = flatten_yf_columns(raw)
 
     if df.empty or len(df) < 90:
         print(f" Insufficient data for {symbol}: only {len(df)} rows")
+        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        if fallback is not None:
+            return fallback
         return pd.DataFrame()
 
     df = df.reset_index()
@@ -351,7 +408,9 @@ def get_yf_data(symbol):
     df.set_index('Date', inplace=True)
     df.sort_index(inplace=True)
 
-    return df[numeric_cols]
+    cleaned = df[numeric_cols]
+    _store_cached_data(symbol, cleaned)
+    return cleaned
 
 
 def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str, pd.DataFrame]:
