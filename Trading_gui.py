@@ -1256,10 +1256,25 @@ def fetch_institution_snapshot(
 
         major = ticker.get_major_holders()
         if isinstance(major, pd.DataFrame) and not major.empty:
-            major.columns = ["metric", "value"]
+            major = major.copy()
+            if major.shape[1] >= 2:
+                major = major.iloc[:, :2]
+                major.columns = ["metric", "value"]
+            else:
+                first_col = major.columns[0]
+                major = major.rename(columns={first_col: "metric"})
+                major["value"] = pd.NA
+
+            major["metric"] = major["metric"].astype(str)
             mask = major["metric"].str.contains("Institutions", case=False, na=False)
             if mask.any():
-                inst_summary["pct_held_by_institutions"] = float(major.loc[mask, "value"].iloc[0])
+                value_series = major.loc[mask, "value"].dropna()
+                if not value_series.empty:
+                    pct_value = _coerce_float(value_series.iloc[0])
+                    if pct_value is not None:
+                        if abs(pct_value) <= 1:
+                            pct_value *= 100.0
+                        inst_summary["pct_held_by_institutions"] = float(pct_value)
 
         info: dict[str, Any] = {}
         try:
