@@ -1816,9 +1816,9 @@ def show_candlestick():
     if change_value is None or change_value == 0:
         change_color = "#333333"
     elif change_value > 0:
-        change_color = "green"
+        change_color = "#006400"  # Dark green for better visibility
     else:
-        change_color = "red"
+        change_color = "#8B0000"  # Dark red for better visibility
 
     tk.Label(
         summary_frame,
