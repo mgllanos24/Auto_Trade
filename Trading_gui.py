@@ -30,7 +30,8 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
 
@@ -80,10 +81,14 @@ _long_name_cache = {}
 _institution_activity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _institution_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _quote_summary_cache: dict[tuple[str, tuple[str, ...]], tuple[float, dict[str, Any]]] = {}
+_alpha_vantage_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 QUOTE_SUMMARY_CACHE_TTL = 60 * 15  # 15 minutes
+ALPHAVANTAGE_CACHE_TTL = 60 * 60  # 1 hour
 WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
+
+ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY") or os.environ.get("AV_API_KEY")
 
 SECTOR_ETF_MAP = {
     "Basic Materials": "XLB",
@@ -496,6 +501,27 @@ def _coerce_float(value: Any) -> Optional[float]:
     return None
 
 
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (float, int)):
+        try:
+            return pd.isna(value)
+        except Exception:  # pragma: no cover - defensive
+            return False
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _assign_if_missing(summary: dict[str, Any], key: str, value: Any) -> None:
+    if value is None:
+        return
+    current = summary.get(key)
+    if _is_missing(current):
+        summary[key] = value
+
+
 def _fetch_quote_summary(
     symbol: str, modules: tuple[str, ...]
 ) -> tuple[dict[str, Any], Optional[str]]:
@@ -512,8 +538,16 @@ def _fetch_quote_summary(
         f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules={module_param}"
     )
 
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        },
+    )
+
     try:
-        with urlopen(url) as response:
+        with urlopen(request) as response:
             payload = json.load(response)
     except URLError as exc:
         reason = getattr(exc, "reason", exc)
@@ -537,6 +571,123 @@ def _fetch_quote_summary(
     _quote_summary_cache[cache_key] = (now, summary)
     return summary, None
 
+
+def _fetch_alpha_vantage_payload(
+    symbol: str, function: str
+) -> tuple[dict[str, Any], Optional[str]]:
+    if not ALPHAVANTAGE_API_KEY:
+        return {}, "Alpha Vantage API key not configured."
+
+    cache_key = (symbol, function)
+    now = time.time()
+    cached = _alpha_vantage_cache.get(cache_key)
+    if cached and now - cached[0] < ALPHAVANTAGE_CACHE_TTL:
+        return cached[1], None
+
+    params = urlencode(
+        {
+            "function": function,
+            "symbol": symbol,
+            "apikey": ALPHAVANTAGE_API_KEY,
+        }
+    )
+    url = f"https://www.alphavantage.co/query?{params}"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request) as response:
+            payload = json.load(response)
+    except URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return {}, f"Unable to load Alpha Vantage data ({reason})."
+    except Exception as exc:  # pragma: no cover - defensive
+        return {}, f"Unable to load Alpha Vantage data ({exc})."
+
+    if not isinstance(payload, dict):
+        return {}, "Unexpected Alpha Vantage response."
+
+    if payload.get("Error Message"):
+        return {}, payload.get("Error Message")
+
+    for key in ("Note", "Information"):
+        if key in payload:
+            return {}, payload[key]
+
+    _alpha_vantage_cache[cache_key] = (now, payload)
+    return payload, None
+
+
+def _merge_alpha_vantage_overview(
+    summary: dict[str, Any], payload: dict[str, Any], close_price: Optional[float]
+) -> None:
+    if not payload:
+        return
+
+    def update_numeric(field: str, key: str, *, percent: bool = False) -> None:
+        raw = payload.get(key)
+        value = _coerce_float(raw)
+        if value is None:
+            return
+        if percent and abs(value) <= 1:
+            value *= 100.0
+        _assign_if_missing(summary, field, float(value))
+
+    update_numeric("pe_ttm", "PERatio")
+    update_numeric("forward_pe", "ForwardPE")
+    update_numeric("peg_ratio", "PEGRatio")
+    update_numeric("dividend_yield_pct", "DividendYield", percent=True)
+    update_numeric("roe_pct", "ReturnOnEquityTTM", percent=True)
+    update_numeric("de_ratio", "DebtToEquity")
+    update_numeric("eps_growth_yoy_pct", "QuarterlyEarningsGrowthYOY", percent=True)
+    update_numeric("revenue_growth_yoy_pct", "QuarterlyRevenueGrowthYOY", percent=True)
+
+    free_cash_flow = _coerce_float(payload.get("FreeCashFlowTTM"))
+    if free_cash_flow is not None:
+        _assign_if_missing(summary, "free_cash_flow", float(free_cash_flow))
+
+    target_price = _coerce_float(payload.get("AnalystTargetPrice"))
+    if target_price is not None:
+        _assign_if_missing(summary, "avg_target_price", float(target_price))
+        if not _is_missing(summary.get("avg_target_upside_pct")):
+            pass
+        elif close_price and close_price != 0:
+            upside = (float(target_price) - close_price) / close_price * 100.0
+            summary["avg_target_upside_pct"] = float(upside)
+
+    beta_value = _coerce_float(payload.get("Beta"))
+    if beta_value is not None:
+        _assign_if_missing(summary, "beta", float(beta_value))
+
+    next_earnings = payload.get("NextEarningsDate")
+    parsed_earnings = _parse_report_datetime(next_earnings)
+    if parsed_earnings is not None:
+        _assign_if_missing(summary, "next_earnings", parsed_earnings)
+
+    sector_name = payload.get("Sector")
+    if isinstance(sector_name, str) and sector_name.strip():
+        cleaned = sector_name.strip()
+        _assign_if_missing(summary, "sector", cleaned)
+        if _is_missing(summary.get("sector_etf")):
+            summary["sector_etf"] = SECTOR_ETF_MAP.get(cleaned)
+
+
+def _merge_alpha_vantage_rating(summary: dict[str, Any], payload: dict[str, Any]) -> None:
+    if not payload:
+        return
+
+    recommendation = payload.get("ratingRecommendation")
+    if isinstance(recommendation, str) and recommendation.strip():
+        _assign_if_missing(summary, "analyst_rating", recommendation.strip().title())
+
+    target = _coerce_float(payload.get("ratingDetailsTargetPriceScore"))
+    if target is not None:
+        summary.setdefault("_alpha_rating_score", float(target))
 
 def _normalise_report_date(raw: Any) -> str:
     if raw is None:
@@ -1236,6 +1387,15 @@ def fetch_institution_snapshot(
                     inst_summary["insider_sells_3m"] = sells
     except Exception as exc:  # pragma: no cover - network
         return inst_summary, f"Unable to load institutional snapshot ({exc})."
+
+    if ALPHAVANTAGE_API_KEY:
+        overview_payload, _ = _fetch_alpha_vantage_payload(symbol, "OVERVIEW")
+        if overview_payload:
+            _merge_alpha_vantage_overview(inst_summary, overview_payload, close_price)
+
+        rating_payload, _ = _fetch_alpha_vantage_payload(symbol, "RATING")
+        if rating_payload:
+            _merge_alpha_vantage_rating(inst_summary, rating_payload)
 
     _institution_snapshot_cache[symbol] = (now, inst_summary)
     return inst_summary, None
