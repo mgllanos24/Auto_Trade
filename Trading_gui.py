@@ -161,6 +161,209 @@ def _format_dollar_amount(value: Optional[float]) -> str:
     return f"{sign}${absolute:.2f}"
 
 
+def _coerce_numeric(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+        if math.isnan(numeric):
+            return None
+        return numeric
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
+def _score_to_color(score: int) -> str:
+    if score > 0:
+        return "#0f9d58"
+    if score < 0:
+        return "#d93025"
+    return "#fbbc05"
+
+
+def _score_to_icon(score: int) -> str:
+    if score > 0:
+        return "↑"
+    if score < 0:
+        return "↓"
+    return "↔"
+
+
+def _score_mfi(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric <= 20:
+        return 1
+    if numeric >= 80:
+        return -1
+    return 0
+
+
+def _score_rsi(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric <= 30:
+        return 1
+    if numeric >= 70:
+        return -1
+    return 0
+
+
+def _score_ad_slope(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric > 0:
+        return 1
+    if numeric < 0:
+        return -1
+    return 0
+
+
+def _score_obv_trend(value: Any) -> int:
+    if not value:
+        return 0
+    text = str(value).lower()
+    if any(keyword in text for keyword in ("up", "rise", "bull")):
+        return 1
+    if any(keyword in text for keyword in ("down", "fall", "bear")):
+        return -1
+    return 0
+
+
+def _score_beta(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric <= 0.9:
+        return 1
+    if numeric >= 1.3:
+        return -1
+    return 0
+
+
+def _score_signal(description: str) -> int:
+    if not description:
+        return 0
+    lowered = description.lower()
+    if "bullish" in lowered:
+        return 1
+    if "bearish" in lowered:
+        return -1
+    return 0
+
+
+def _score_positive_growth(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric > 0:
+        return 1
+    if numeric < 0:
+        return -1
+    return 0
+
+
+def _score_debt_to_equity(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric <= 0.5:
+        return 1
+    if numeric >= 1.5:
+        return -1
+    return 0
+
+
+def _score_roe(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric >= 15:
+        return 1
+    if numeric < 5:
+        return -1
+    return 0
+
+
+def _score_peg(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric <= 1:
+        return 1
+    if numeric >= 2:
+        return -1
+    return 0
+
+
+def _score_pe(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if 10 <= numeric <= 25:
+        return 1
+    if numeric < 5 or numeric > 40:
+        return -1
+    return 0
+
+
+def _score_dividend_yield(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric >= 0.03:
+        return 1
+    if numeric <= 0:
+        return -1
+    return 0
+
+
+def _score_institutional_pct(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric >= 0.6:
+        return 1
+    if numeric <= 0.3:
+        return -1
+    return 0
+
+
+def _score_institutional_trend(value: Any) -> int:
+    numeric = _coerce_numeric(value)
+    if numeric is None:
+        return 0
+    if numeric > 0:
+        return 1
+    if numeric < 0:
+        return -1
+    return 0
+
+
+def _compute_institutional_strength(snapshot_summary: dict[str, Any]) -> Optional[int]:
+    if not snapshot_summary:
+        return None
+
+    scores: list[int] = []
+    scores.append(_score_institutional_pct(snapshot_summary.get("pct_held_by_institutions")))
+    scores.append(_score_institutional_trend(snapshot_summary.get("inst_shares_qoq_pct")))
+    scores.append(_score_positive_growth(snapshot_summary.get("insider_buys_3m")))
+    scores.append(-_score_positive_growth(snapshot_summary.get("insider_sells_3m")))
+
+    valid_scores = [score for score in scores if score is not None]
+    if not valid_scores:
+        return None
+
+    # Map -1/0/1 to 0/50/100 to create an intuitive scorecard.
+    total = sum(valid_scores)
+    max_total = len(valid_scores)
+    normalized = (total / max_total + 1) / 2  # Range 0-1
+    return int(round(normalized * 100))
+
+
 def _format_percent(value: Optional[float], *, signed: bool = False) -> str:
     if value is None or (isinstance(value, (float, int)) and pd.isna(value)):
         return "N/A"
@@ -1497,6 +1700,46 @@ def show_candlestick():
                 anchor="w",
             ).pack(**content_pad)
 
+        def add_metric_section(
+            title: str,
+            metrics: list[tuple[str, str, int]],
+            *,
+            title_pady: tuple[int, int] = (0, 2),
+        ) -> None:
+            tk.Label(
+                info_panel,
+                text=title,
+                font=("Arial", 11, "bold"),
+                anchor="w",
+                bg="#f5f5f5",
+            ).pack(fill="x", padx=4, pady=title_pady)
+
+            section_frame = tk.Frame(info_panel, bg="#f5f5f5")
+            section_frame.pack(fill="x", padx=4, pady=(0, 4))
+
+            for label_text, value_text, score in metrics:
+                row = tk.Frame(section_frame, bg="#f5f5f5")
+                row.pack(fill="x", pady=1)
+
+                tk.Label(
+                    row,
+                    text=f"{label_text}:",
+                    font=("Arial", 10, "bold"),
+                    anchor="w",
+                    bg="#f5f5f5",
+                ).pack(side="left")
+
+                fg_color = _score_to_color(score)
+                icon = _score_to_icon(score)
+                tk.Label(
+                    row,
+                    text=f"  {icon} {value_text}",
+                    font=("Arial", 10),
+                    anchor="w",
+                    bg="#f5f5f5",
+                    fg=fg_color,
+                ).pack(side="left")
+
         add_separator(pady=(4, 6))
 
         mfi_text = _format_decimal(snapshot_summary.get("mfi_14"))
@@ -1516,37 +1759,44 @@ def show_candlestick():
         )
         pattern_display = pattern_name or "N/A"
 
-        technical_text = (
-            f"MFI (14): {mfi_text}      RSI (14): {rsi_text}\n"
-            f"A/D Slope (60): {ad_text}      OBV Trend: {obv_trend}\n"
-            f"Volume (30D Avg): {volume_text}      Beta: {beta_text}\n"
-            f"Pattern: {pattern_display}      Signal: {signal_icon} {signal_description}"
-        )
-        add_section("📊 Technical Summary", technical_text, title_pady=(0, 2))
+        technical_metrics = [
+            ("MFI (14)", mfi_text, _score_mfi(snapshot_summary.get("mfi_14"))),
+            ("RSI (14)", rsi_text, _score_rsi(snapshot_summary.get("rsi_14"))),
+            ("A/D Slope (60)", ad_text, _score_ad_slope(snapshot_summary.get("ad_slope_60"))),
+            ("OBV Trend", obv_trend, _score_obv_trend(snapshot_summary.get("obv_trend"))),
+            ("Volume (30D Avg)", volume_text, 0),
+            ("Beta", beta_text, _score_beta(snapshot_summary.get("beta"))),
+            ("Pattern", pattern_display, 0),
+            (
+                "Signal",
+                f"{signal_icon} {signal_description}",
+                _score_signal(signal_description),
+            ),
+        ]
+        add_metric_section("📊 Technical Summary", technical_metrics, title_pady=(0, 2))
 
         add_separator()
 
         filers_text = _format_int(snapshot_summary.get("inst_count"))
         shares_text = _format_shares(snapshot_summary.get("inst_shares_sum"))
-        pct_text = _format_percent(snapshot_summary.get("pct_held_by_institutions"))
-        qoq_text = "N/A"
-
-        snapshot_lines = [
-            f"Filers: {filers_text}      Shares Held: {shares_text}",
-            f"Institutional %: {pct_text}      QoQ Change: {qoq_text}",
-        ]
+        pct_value = snapshot_summary.get("pct_held_by_institutions")
+        pct_text = _format_percent(pct_value)
+        qoq_value = snapshot_summary.get("inst_shares_qoq_pct")
+        qoq_text = _format_percent(qoq_value, signed=True)
 
         top_holders = snapshot_summary.get("top_holders") or []
         if top_holders:
-            snapshot_lines.append("Top Holders:")
+            holder_parts: list[str] = []
             for holder in top_holders:
                 holder_name = holder.get("name", "Unknown")
-                pct_value = holder.get("pct")
-                if isinstance(pct_value, (int, float)) and not math.isnan(pct_value):
-                    holder_text = f"  - {holder_name} ({pct_value:.1f}%)"
+                pct_holder = holder.get("pct")
+                if isinstance(pct_holder, (int, float)) and not math.isnan(pct_holder):
+                    holder_parts.append(f"{holder_name} ({pct_holder:.1f}%)")
                 else:
-                    holder_text = f"  - {holder_name}"
-                snapshot_lines.append(holder_text)
+                    holder_parts.append(str(holder_name))
+            top_holder_text = ", ".join(holder_parts)
+        else:
+            top_holder_text = "N/A"
 
         insider_buys = snapshot_summary.get("insider_buys_3m")
         insider_sells = snapshot_summary.get("insider_sells_3m")
@@ -1565,37 +1815,115 @@ def show_candlestick():
         else:
             insider_sells_text = str(insider_sells)
 
-        snapshot_lines.append(
-            f"Insider Buys (3M): {insider_buys_text}         Insider Sells: {insider_sells_text}"
-        )
+        inst_metrics = [
+            ("Filers", filers_text, 0),
+            ("Shares Held", shares_text, 0),
+            (
+                "Institutional %",
+                pct_text,
+                _score_institutional_pct(pct_value),
+            ),
+            (
+                "QoQ Change",
+                qoq_text,
+                _score_institutional_trend(qoq_value),
+            ),
+            ("Top Holders", top_holder_text, 0),
+            (
+                "Insider Buys (3M)",
+                insider_buys_text,
+                _score_positive_growth(insider_buys),
+            ),
+            (
+                "Insider Sells (3M)",
+                insider_sells_text,
+                -_score_positive_growth(insider_sells),
+            ),
+        ]
 
-        add_section("🏦 Institutional Snapshot", "\n".join(snapshot_lines), title_pady=(0, 2))
+        add_metric_section("🏦 Institutional Snapshot", inst_metrics, title_pady=(0, 2))
+
+        strength_score = _compute_institutional_strength(snapshot_summary)
+        if strength_score is not None:
+            score_band = 1 if strength_score >= 67 else -1 if strength_score <= 33 else 0
+            tk.Label(
+                info_panel,
+                text=f"Institutional Strength Score: {strength_score}",
+                font=("Arial", 10, "bold"),
+                anchor="w",
+                bg="#f5f5f5",
+                fg=_score_to_color(score_band),
+            ).pack(fill="x", padx=4, pady=(0, 4))
 
         add_separator()
 
         pe_text = _format_decimal(snapshot_summary.get("pe_ttm"))
         fwd_pe_text = _format_decimal(snapshot_summary.get("forward_pe"))
         peg_text = _format_decimal(snapshot_summary.get("peg_ratio"))
-        dividend_text = _format_percent(snapshot_summary.get("dividend_yield_pct"))
-        roe_text = _format_percent(snapshot_summary.get("roe_pct"))
+        dividend_value = snapshot_summary.get("dividend_yield_pct")
+        dividend_text = _format_percent(dividend_value)
+        roe_value = snapshot_summary.get("roe_pct")
+        roe_text = _format_percent(roe_value)
         de_text = _format_decimal(snapshot_summary.get("de_ratio"))
-        eps_growth_text = _format_percent(
-            snapshot_summary.get("eps_growth_yoy_pct"), signed=True
-        )
-        revenue_growth_text = _format_percent(
-            snapshot_summary.get("revenue_growth_yoy_pct"), signed=True
-        )
-        fcf_text = _format_dollar_amount(snapshot_summary.get("free_cash_flow"))
+        eps_growth_value = snapshot_summary.get("eps_growth_yoy_pct")
+        eps_growth_text = _format_percent(eps_growth_value, signed=True)
+        revenue_growth_value = snapshot_summary.get("revenue_growth_yoy_pct")
+        revenue_growth_text = _format_percent(revenue_growth_value, signed=True)
+        fcf_value = snapshot_summary.get("free_cash_flow")
+        fcf_text = _format_dollar_amount(fcf_value)
 
-        fundamentals_lines = [
-            f"P/E (TTM): {pe_text}     Forward P/E: {fwd_pe_text}",
-            f"PEG Ratio: {peg_text}      Dividend Yield: {dividend_text}",
-            f"ROE: {roe_text}          Debt/Equity: {de_text}",
-            f"EPS Growth (YoY): {eps_growth_text}",
-            f"Revenue Growth (YoY): {revenue_growth_text}",
-            f"Free Cash Flow (TTM): {fcf_text}",
+        dividend_score_value = None
+        numeric_dividend = _coerce_numeric(dividend_value)
+        if numeric_dividend is not None:
+            dividend_score_value = numeric_dividend / 100.0
+
+        roe_score_value = None
+        numeric_roe = _coerce_numeric(roe_value)
+        if numeric_roe is not None:
+            roe_score_value = numeric_roe
+
+        eps_score_value = None
+        numeric_eps = _coerce_numeric(eps_growth_value)
+        if numeric_eps is not None:
+            eps_score_value = numeric_eps / 100.0
+
+        revenue_score_value = None
+        numeric_revenue = _coerce_numeric(revenue_growth_value)
+        if numeric_revenue is not None:
+            revenue_score_value = numeric_revenue / 100.0
+
+        fundamentals_metrics = [
+            ("P/E (TTM)", pe_text, _score_pe(snapshot_summary.get("pe_ttm"))),
+            ("Forward P/E", fwd_pe_text, _score_pe(snapshot_summary.get("forward_pe"))),
+            ("PEG Ratio", peg_text, _score_peg(snapshot_summary.get("peg_ratio"))),
+            (
+                "Dividend Yield",
+                dividend_text,
+                _score_dividend_yield(dividend_score_value),
+            ),
+            ("ROE", roe_text, _score_roe(roe_score_value)),
+            (
+                "Debt/Equity",
+                de_text,
+                -_score_debt_to_equity(snapshot_summary.get("de_ratio")),
+            ),
+            (
+                "EPS Growth (YoY)",
+                eps_growth_text,
+                _score_positive_growth(eps_score_value),
+            ),
+            (
+                "Revenue Growth (YoY)",
+                revenue_growth_text,
+                _score_positive_growth(revenue_score_value),
+            ),
+            (
+                "Free Cash Flow (TTM)",
+                fcf_text,
+                _score_positive_growth(fcf_value),
+            ),
         ]
-        add_section("💰 Fundamentals", "\n".join(fundamentals_lines), title_pady=(0, 2))
+        add_metric_section("💰 Fundamentals", fundamentals_metrics, title_pady=(0, 2))
 
         add_separator()
 
