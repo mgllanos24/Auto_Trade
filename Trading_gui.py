@@ -178,7 +178,7 @@ def _coerce_numeric(value: Any) -> Optional[float]:
         return None
 
 
-NA_TEXT_COLOR = "#5f6368"
+NA_TEXT_COLOR = "#000000"
 
 
 def _score_to_color(score: int) -> str:
@@ -186,7 +186,7 @@ def _score_to_color(score: int) -> str:
         return "#0f9d58"
     if score < 0:
         return "#d93025"
-    return "#fbbc05"
+    return "#000000"
 
 
 def _score_to_icon(score: int) -> str:
