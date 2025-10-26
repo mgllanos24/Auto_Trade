@@ -1744,7 +1744,7 @@ def show_candlestick():
 
     snapshot_summary, snapshot_error = fetch_institution_snapshot(sym, df)
 
-    info_container = tk.Frame(chart_frame, bg="#f5f5f5", width=260)
+    info_container = tk.Frame(chart_frame, bg="#f5f5f5", width=320)
     info_container.pack(side="left", fill="y", padx=(0, 10), pady=5)
     info_container.pack_propagate(False)
 
@@ -1873,7 +1873,7 @@ def show_candlestick():
                 info_panel,
                 text=body,
                 justify="left",
-                wraplength=240,
+                wraplength=300,
                 bg="#f5f5f5",
                 anchor="w",
             ).pack(**content_pad)
