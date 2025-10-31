@@ -27,6 +27,7 @@ import time
 import threading
 import signal
 import json
+import csv
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.error import URLError
@@ -164,6 +165,31 @@ def _format_dollar_amount(value: Optional[float]) -> str:
     if absolute >= 1:
         return f"{sign}${absolute:,.2f}"
     return f"{sign}${absolute:.2f}"
+
+
+_WATCHLIST_PRICE_COLUMNS = {"breakout_high", "target_price", "stop_loss"}
+
+
+def _format_watchlist_value(column: str, value: Any) -> str:
+    if column in _WATCHLIST_PRICE_COLUMNS:
+        return _format_price(value)
+
+    if column == "rr_ratio":
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value) if value not in (None, "") else "N/A"
+        if not math.isfinite(numeric):
+            return "N/A"
+        return f"{numeric:.2f}"
+
+    if value in (None, ""):
+        return ""
+
+    if isinstance(value, (float, int)) and pd.isna(value):
+        return ""
+
+    return str(value)
 
 
 def _coerce_numeric(value: Any) -> Optional[float]:
@@ -2644,9 +2670,17 @@ def load_watchlist():
     tree.delete(*tree.get_children())
     if not WATCHLIST_PATH.exists():
         return
-    df = pd.read_csv(WATCHLIST_PATH)
-    for _, row in df.iterrows():
-        tree.insert("", "end", values=[row[col] for col in WATCHLIST_COLUMNS])
+    try:
+        with WATCHLIST_PATH.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                values = []
+                for column in WATCHLIST_COLUMNS:
+                    raw_value = row.get(column, "") if row else ""
+                    values.append(_format_watchlist_value(column, raw_value))
+                tree.insert("", "end", values=values)
+    except Exception as exc:
+        messagebox.showerror("Watchlist", f"Failed to load watchlist:\n{exc}")
 
 def refresh_watchlist():
     script_dir = SCRIPT_DIR
