@@ -327,6 +327,62 @@ def _store_cached_data(symbol: str, df: pd.DataFrame) -> None:
         print(f" Failed to write cache for {symbol}: {exc}")
 
 
+def _apply_split_adjustments(df: pd.DataFrame) -> None:
+    """Mutate *df* so that OHLC prices honour split adjustments."""
+
+    adj_close = df.get('adj_close')
+    if adj_close is None:
+        return
+
+    close = df.get('close')
+    if close is None:
+        return
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        adjustment = adj_close / close
+
+    if hasattr(adjustment, 'replace'):
+        adjustment = adjustment.replace([np.inf, -np.inf], np.nan)
+
+    if hasattr(adjustment, 'notna'):
+        valid_mask = adjustment.notna()
+    else:  # pragma: no cover - defensive fallback
+        valid_mask = [value is not None for value in adjustment]
+
+    if hasattr(np, 'isfinite') and not isinstance(adjustment, (int, float)):
+        finite_mask = np.isfinite(adjustment)
+        if hasattr(valid_mask, '__and__'):
+            valid_mask = valid_mask & finite_mask
+        else:  # pragma: no cover - defensive fallback
+            valid_mask = [v and f for v, f in zip(valid_mask, finite_mask)]
+
+    if hasattr(close, 'ne'):
+        nonzero = close.ne(0)
+    else:  # pragma: no cover - defensive fallback
+        nonzero = [value != 0 for value in close]
+
+    if hasattr(valid_mask, '__and__'):
+        mask = valid_mask & nonzero
+        has_valid = bool(getattr(mask, 'any', lambda: mask)())
+    else:  # pragma: no cover - defensive fallback
+        mask = [v and nz for v, nz in zip(valid_mask, nonzero)]
+        has_valid = any(mask)
+
+    if not has_valid:
+        return
+
+    if hasattr(df, 'loc'):
+        for column in ('open', 'high', 'low', 'close'):
+            df.loc[mask, column] = df.loc[mask, column] * adjustment[mask]
+    else:  # pragma: no cover - defensive fallback
+        for idx, apply in enumerate(mask):
+            if not apply:
+                continue
+            factor = adjustment[idx]
+            for column in ('open', 'high', 'low', 'close'):
+                df[column][idx] = df[column][idx] * factor
+
+
 def get_yf_data(symbol):
     cached = _load_cached_data(symbol)
     if cached is not None:
@@ -382,6 +438,7 @@ def get_yf_data(symbol):
             'High': 'high',
             'Low': 'low',
             'Close': 'close',
+            'Adj Close': 'adj_close',
             'Volume': 'volume',
         },
         inplace=True,
@@ -391,13 +448,19 @@ def get_yf_data(symbol):
     df = df.dropna(subset=['Date'])
 
     numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    optional_numeric = []
+    if 'adj_close' in df.columns:
+        optional_numeric.append('adj_close')
     missing_columns = [column for column in numeric_cols if column not in df.columns]
     if missing_columns:
         print(f" Missing columns for {symbol}: {missing_columns}")
         return pd.DataFrame()
 
-    for column in numeric_cols:
+    for column in [*numeric_cols, *optional_numeric]:
         df[column] = pd.to_numeric(df[column], errors='coerce')
+
+    if 'adj_close' in df.columns:
+        _apply_split_adjustments(df)
 
     df = df.dropna(subset=numeric_cols)
 
