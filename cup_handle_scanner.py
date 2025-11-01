@@ -33,6 +33,12 @@ class CupHandleHit:
     handle_length: int
     handle_pullback_pct: float
     handle_slope: float
+    left_peak_idx: Optional[int] = None
+    right_peak_idx: Optional[int] = None
+    cup_low_idx: Optional[int] = None
+    handle_start_idx: Optional[int] = None
+    handle_end_idx: Optional[int] = None
+    handle_low_idx: Optional[int] = None
 
 
 _DEF_MIN_CUP_DEPTH_PCT = 0.12
@@ -120,6 +126,79 @@ def detect_cup_and_handle(
     if handle_pullback < 0 or handle_pullback > max_handle_pullback_pct:
         return None
 
+    def _series_index(series: pd.Series, mode: str) -> Optional[object]:
+        if series is None or getattr(series, "empty", True):
+            return None
+        try:
+            if mode == "max":
+                return series.idxmax()
+            return series.idxmin()
+        except AttributeError:
+            pass
+
+        try:
+            values = series.to_numpy()
+        except AttributeError:
+            try:
+                values = np.asarray(list(series))
+            except Exception:
+                return None
+
+        if values.size == 0:
+            return None
+
+        if mode == "max":
+            try:
+                position = int(np.argmax(values))
+            except AttributeError:
+                position = int(max(range(len(values)), key=lambda idx: values[idx]))
+        else:
+            try:
+                position = int(np.argmin(values))
+            except AttributeError:
+                position = int(min(range(len(values)), key=lambda idx: values[idx]))
+        try:
+            return series.index[position]
+        except Exception:  # pragma: no cover - fallback for stub indices
+            return position
+
+    def _resolve_position(label: Optional[object]) -> Optional[int]:
+        if label is None:
+            return None
+        index_obj = getattr(df, "index", None)
+        if index_obj is None:
+            return None
+        try:
+            if hasattr(index_obj, "get_loc"):
+                loc = index_obj.get_loc(label)  # type: ignore[call-arg]
+            else:
+                loc = list(index_obj).index(label)
+        except (KeyError, ValueError, AttributeError, TypeError):
+            return None
+        if isinstance(loc, slice):
+            loc = loc.start
+        elif isinstance(loc, np.ndarray):
+            if loc.size == 0:
+                return None
+            loc = loc[0]
+        if loc is None:
+            return None
+        try:
+            return int(loc)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+
+    left_peak_idx = _resolve_position(_series_index(left, "max")) if not left.empty else None
+    right_peak_idx = _resolve_position(_series_index(right, "max")) if not right.empty else None
+    cup_low_idx = _resolve_position(_series_index(cup, "min")) if not cup.empty else None
+    handle_index = getattr(handle, "index", None)
+    if handle_index is not None and len(handle_index):
+        handle_start_idx = _resolve_position(handle_index[0])
+        handle_end_idx = _resolve_position(handle_index[-1])
+    else:  # pragma: no cover - defensive
+        handle_start_idx = handle_end_idx = None
+    handle_low_idx = _resolve_position(_series_index(handle, "min")) if not handle.empty else None
+
     return CupHandleHit(
         resistance=resistance,
         cup_depth=cup_depth,
@@ -127,4 +206,10 @@ def detect_cup_and_handle(
         handle_length=int(handle_window),
         handle_pullback_pct=float(handle_pullback),
         handle_slope=handle_slope,
+        left_peak_idx=left_peak_idx,
+        right_peak_idx=right_peak_idx,
+        cup_low_idx=cup_low_idx,
+        handle_start_idx=handle_start_idx,
+        handle_end_idx=handle_end_idx,
+        handle_low_idx=handle_low_idx,
     )

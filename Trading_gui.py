@@ -2792,8 +2792,66 @@ def show_candlestick():
                 )
             if isinstance(hit, CupHandleHit):
                 resistance = hit.resistance
-                ax_price.axhline(resistance, color='#9467bd', linestyle='--', linewidth=1.5, label='Resistance')
+                ax_price.axhline(
+                    resistance,
+                    color='#9467bd',
+                    linestyle='--',
+                    linewidth=1.5,
+                    label='Resistance',
+                )
                 overlay_added = True
+
+                cup_points: list[tuple[int, float, float]] = []
+                for idx in (hit.left_peak_idx, hit.cup_low_idx, hit.right_peak_idx):
+                    if idx is None or not (0 <= idx < len(plot_df)):
+                        continue
+                    date_val = float(plot_df['Date'].iloc[idx])
+                    price_val = float(analysis_df['close'].iloc[idx])
+                    cup_points.append((idx, date_val, price_val))
+
+                if len(cup_points) >= 3:
+                    cup_points.sort(key=lambda point: point[0])
+                    ax_price.plot(
+                        [point[1] for point in cup_points],
+                        [point[2] for point in cup_points],
+                        color='#1f77b4',
+                        linewidth=1.4,
+                        label='Cup',
+                    )
+                    ax_price.scatter(
+                        [point[1] for point in cup_points],
+                        [point[2] for point in cup_points],
+                        color='#1f77b4',
+                        s=35,
+                        zorder=6,
+                    )
+                    overlay_added = True
+
+                handle_points: list[tuple[int, float, float]] = []
+                for idx in (hit.handle_start_idx, hit.handle_low_idx, hit.handle_end_idx):
+                    if idx is None or not (0 <= idx < len(plot_df)):
+                        continue
+                    date_val = float(plot_df['Date'].iloc[idx])
+                    price_val = float(analysis_df['close'].iloc[idx])
+                    handle_points.append((idx, date_val, price_val))
+
+                if len(handle_points) >= 2:
+                    handle_points.sort(key=lambda point: point[0])
+                    ax_price.plot(
+                        [point[1] for point in handle_points],
+                        [point[2] for point in handle_points],
+                        color='#ff7f0e',
+                        linewidth=1.4,
+                        label='Handle',
+                    )
+                    ax_price.scatter(
+                        [point[1] for point in handle_points],
+                        [point[2] for point in handle_points],
+                        color='#ff7f0e',
+                        s=30,
+                        zorder=6,
+                    )
+                    overlay_added = True
         elif name_lower == "inverse head and shoulders":
             ihs = detect_inverse_head_shoulders(analysis_df)
             if not ihs:
@@ -2810,6 +2868,14 @@ def show_candlestick():
                     if len(valid) == 3:
                         dates = [plot_df['Date'].iloc[idx] for idx in indices]
                         ax_price.scatter(dates, lows, color='#d62728', s=50, label='Shoulders/Head', zorder=6)
+                        sorted_points = sorted(zip(indices, lows), key=lambda point: point[0])
+                        ax_price.plot(
+                            [plot_df['Date'].iloc[idx] for idx, _ in sorted_points],
+                            [price for _, price in sorted_points],
+                            color='#1f77b4',
+                            linewidth=1.4,
+                            label='Structure',
+                        )
                         overlay_added = True
 
                     if 0 <= ihs.neckline_left_idx < len(plot_df) and 0 <= ihs.neckline_right_idx < len(plot_df):
@@ -2819,6 +2885,21 @@ def show_candlestick():
                         ]
                         neck_prices = [ihs.neckline_left, ihs.neckline_right]
                         ax_price.plot(neck_dates, neck_prices, color='#9467bd', linestyle='--', linewidth=1.5, label='Neckline')
+                        overlay_added = True
+
+                    if getattr(ihs, 'breakout', False):
+                        breakout_idx = len(plot_df) - 1
+                        breakout_date = plot_df['Date'].iloc[breakout_idx]
+                        breakout_price = analysis_df['close'].iloc[breakout_idx]
+                        ax_price.scatter(
+                            [breakout_date],
+                            [breakout_price],
+                            color='#ff7f0e',
+                            marker='^',
+                            s=60,
+                            zorder=7,
+                            label='Breakout',
+                        )
                         overlay_added = True
                 except Exception:
                     pass

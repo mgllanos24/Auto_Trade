@@ -25,6 +25,12 @@ def test_detect_cup_and_handle_returns_hit_with_metrics():
     assert hit.handle_length == len(handle)
     assert 0 <= hit.handle_pullback_pct < 0.05
     assert hit.handle_slope < 0
+    assert hit.left_peak_idx == 0
+    assert hit.cup_low_idx == len(cup_left) - 1
+    assert hit.right_peak_idx == len(cup) - 1
+    assert hit.handle_start_idx == len(cup)
+    assert hit.handle_end_idx == len(cup) + len(handle) - 1
+    assert hit.handle_low_idx == len(cup) + len(handle) - 1
 
 
 def test_detect_cup_and_handle_rejects_shallow_cup():
