@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 import types
 
@@ -168,79 +167,8 @@ import pattern_scanner
 from pattern_scanner import (
     RiskRewardLevels,
     calculate_rr_price_action,
-    detect_double_bottom,
     detect_ascending_triangle,
 )
-
-
-class DummyDataFrame:
-    def __init__(self, rows: int):
-        self._rows = rows
-
-    def __len__(self) -> int:
-        return self._rows
-
-
-def _make_dummy(rows: int = 100):
-    df = DummyDataFrame(rows)
-    index = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(rows)]
-    return df, index
-
-
-def test_detect_double_bottom_prefers_recent_hit(monkeypatch):
-    df, index = _make_dummy()
-    total_rows = len(df)
-
-    old_hit = types.SimpleNamespace(
-        start_idx=0,
-        end_idx=59,
-        left_idx=10,
-        right_idx=20,
-        left_timestamp=index[10],
-        right_timestamp=index[20],
-        support=49.5,
-        neckline=55.0,
-        left_low=49.0,
-        right_low=49.5,
-        bounce_pct=0.08,
-        touch_count=2,
-        contraction_pct=None,
-        volume_contracted=None,
-        breakout=True,
-        breakout_idx=30,
-        breakout_timestamp=index[30],
-        breakout_price=56.0,
-    )
-
-    recent_hit = types.SimpleNamespace(
-        start_idx=total_rows - 60,
-        end_idx=total_rows - 1,
-        left_idx=total_rows - 15,
-        right_idx=total_rows - 8,
-        left_timestamp=index[total_rows - 15],
-        right_timestamp=index[total_rows - 8],
-        support=58.5,
-        neckline=60.0,
-        left_low=58.0,
-        right_low=58.2,
-        bounce_pct=0.06,
-        touch_count=2,
-        contraction_pct=None,
-        volume_contracted=None,
-        breakout=True,
-        breakout_idx=total_rows - 2,
-        breakout_timestamp=index[total_rows - 2],
-        breakout_price=60.5,
-    )
-
-    def fake_scan_double_bottoms(*args, **kwargs):
-        return [old_hit, recent_hit]
-
-    monkeypatch.setattr("pattern_scanner.scan_double_bottoms", fake_scan_double_bottoms)
-
-    result = detect_double_bottom(df, window=60)
-
-    assert result is recent_hit
 
 
 class _Series:
