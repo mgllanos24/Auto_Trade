@@ -1149,7 +1149,7 @@ def detect_bullish_rectangle(
     df,
     window=60,
     tolerance=0.02,
-    min_touches=2,
+    min_touches=4,
 ) -> Optional[BullishRectanglePattern]:
     if len(df) < window:
         return None
