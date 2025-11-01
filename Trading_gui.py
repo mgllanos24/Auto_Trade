@@ -187,6 +187,9 @@ _WATCHLIST_REFRESH_TTL = 60 * 5
 
 _LAST_ADDED_MY_WATCHLIST_SYMBOL: Optional[str] = None
 
+_MY_WATCHLIST_LISTBOX: Optional[tk.Listbox] = None
+_MY_WATCHLIST_SYMBOLS: list[str] = []
+
 
 def _mark_last_added_my_watchlist_symbol(symbol: str) -> None:
     """Record the most recently added My Watchlist symbol."""
@@ -203,6 +206,136 @@ def _consume_last_added_my_watchlist_symbol() -> Optional[str]:
     symbol = _LAST_ADDED_MY_WATCHLIST_SYMBOL
     _LAST_ADDED_MY_WATCHLIST_SYMBOL = None
     return symbol
+
+
+def _focus_watchlist_symbol(event=None) -> None:
+    """Select the highlighted watchlist symbol in the main results table."""
+
+    if not _MY_WATCHLIST_SYMBOLS:
+        return
+
+    listbox = _MY_WATCHLIST_LISTBOX
+    if listbox is None:
+        return
+
+    selection = listbox.curselection()
+    if not selection:
+        return
+
+    index = selection[0]
+    if index >= len(_MY_WATCHLIST_SYMBOLS):
+        return
+
+    target_symbol = _MY_WATCHLIST_SYMBOLS[index]
+    tree_widget = globals().get("tree")
+    if tree_widget is None:
+        return
+
+    for item in tree_widget.get_children():
+        item_values = tree_widget.item(item).get("values")
+        if item_values and str(item_values[0]).strip().upper() == target_symbol:
+            tree_widget.selection_set(item)
+            tree_widget.focus(item)
+            tree_widget.see(item)
+            break
+
+
+def _refresh_my_watchlist_list(
+    *, target_symbol: Optional[str] = None, current_symbol: Optional[str] = None
+) -> None:
+    """Refresh the "My Watchlist" listbox contents."""
+
+    listbox = _MY_WATCHLIST_LISTBOX
+    if listbox is None:
+        return
+
+    normalized_target = (target_symbol or "").strip().upper() or None
+    normalized_current = (current_symbol or "").strip().upper() or None
+
+    listbox.configure(state=tk.NORMAL)
+    listbox.delete(0, tk.END)
+    listbox.selection_clear(0, tk.END)
+    _MY_WATCHLIST_SYMBOLS.clear()
+
+    try:
+        entries = _read_my_watchlist_entries()
+    except Exception as exc:  # pragma: no cover - defensive GUI feedback
+        listbox.insert("end", "Unable to load My Watchlist.")
+        listbox.configure(state=tk.DISABLED)
+        messagebox.showwarning("My Watchlist", f"Failed to load My Watchlist:\n{exc}")
+        return
+
+    selection_index: Optional[int] = None
+    for entry in entries:
+        symbol_value = str(entry.get("symbol", "")).strip().upper()
+        if not symbol_value:
+            continue
+
+        label = str(entry.get("label", "")).strip()
+        display_text = f"{symbol_value} — {label}" if label else symbol_value
+
+        _MY_WATCHLIST_SYMBOLS.append(symbol_value)
+        current_index = len(_MY_WATCHLIST_SYMBOLS) - 1
+        listbox.insert("end", display_text)
+
+        if normalized_target and symbol_value == normalized_target:
+            selection_index = current_index
+        elif not normalized_target and normalized_current and symbol_value == normalized_current:
+            selection_index = current_index
+
+    if not _MY_WATCHLIST_SYMBOLS:
+        listbox.insert("end", "My Watchlist is empty.")
+        listbox.configure(state=tk.DISABLED)
+        return
+
+    listbox.configure(state=tk.NORMAL)
+    listbox.selection_clear(0, tk.END)
+    if selection_index is not None:
+        listbox.selection_set(selection_index)
+        listbox.activate(selection_index)
+        listbox.see(selection_index)
+
+
+def _init_my_watchlist_section(parent: tk.Misc) -> None:
+    """Initialise the persistent "My Watchlist" section within the UI."""
+
+    global _MY_WATCHLIST_LISTBOX
+
+    container = tk.LabelFrame(parent, text="My Watchlist", padx=6, pady=6)
+    container.pack(fill="both", expand=True, pady=(10, 0))
+
+    list_container = tk.Frame(container, bg="#ffffff", bd=1, relief="solid")
+    list_container.pack(fill="both", expand=True)
+
+    listbox = tk.Listbox(
+        list_container,
+        height=8,
+        exportselection=False,
+        activestyle="none",
+        bg="#ffffff",
+        bd=0,
+        highlightthickness=0,
+    )
+    listbox.pack(side="left", fill="both", expand=True)
+
+    scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=listbox.yview)
+    scrollbar.pack(side="right", fill="y")
+    listbox.configure(yscrollcommand=scrollbar.set)
+
+    listbox.bind("<Double-Button-1>", _focus_watchlist_symbol)
+    listbox.bind("<Return>", _focus_watchlist_symbol)
+
+    tk.Label(
+        container,
+        text="Double-click a symbol in the list above to focus it in the main watchlist.",
+        font=("Arial", 8),
+        anchor="w",
+        justify="left",
+        wraplength=260,
+    ).pack(fill="x", padx=2, pady=(6, 2))
+
+    _MY_WATCHLIST_LISTBOX = listbox
+    _refresh_my_watchlist_list()
 
 
 def _extract_fast_info_price(fast_info: Any) -> Optional[float]:
@@ -2068,6 +2201,10 @@ def show_candlestick():
             df.to_csv(data_file)
 
     df = symbol_data[sym]
+
+    target_for_refresh = _consume_last_added_my_watchlist_symbol()
+    _refresh_my_watchlist_list(target_symbol=target_for_refresh, current_symbol=sym)
+
     for w in chart_frame.winfo_children():
         w.destroy()
 
@@ -2126,104 +2263,6 @@ def show_candlestick():
     info_panel.bind("<Leave>", _unbind_mousewheel)
     info_canvas.yview_moveto(0)
 
-    tk.Label(
-        info_panel,
-        text="My Watchlist",
-        font=("Arial", 11, "bold"),
-        anchor="w",
-        bg="#f5f5f5",
-    ).pack(fill="x", padx=4, pady=(4, 0))
-
-    watchlist_section = tk.Frame(info_panel, bg="#ffffff", bd=1, relief="solid")
-    watchlist_section.pack(fill="x", padx=4, pady=(2, 8))
-
-    list_container = tk.Frame(watchlist_section, bg="#ffffff")
-    list_container.pack(fill="x", padx=4, pady=(4, 2))
-
-    watchlist_list = tk.Listbox(
-        list_container,
-        height=8,
-        exportselection=False,
-        activestyle="none",
-        bg="#ffffff",
-        bd=0,
-        highlightthickness=0,
-    )
-    watchlist_list.pack(side="left", fill="x", expand=True)
-
-    watchlist_scroll = ttk.Scrollbar(list_container, orient="vertical", command=watchlist_list.yview)
-    watchlist_scroll.pack(side="right", fill="y")
-    watchlist_list.configure(yscrollcommand=watchlist_scroll.set)
-
-    watchlist_symbols: list[str] = []
-
-    def _refresh_my_watchlist_list(target_symbol: Optional[str] = None):
-        watchlist_list.delete(0, tk.END)
-        watchlist_symbols.clear()
-
-        try:
-            entries = _read_my_watchlist_entries()
-        except Exception as exc:  # pragma: no cover - defensive GUI feedback
-            watchlist_list.insert("end", "Unable to load My Watchlist.")
-            watchlist_list.configure(state=tk.DISABLED)
-            messagebox.showwarning("My Watchlist", f"Failed to load My Watchlist:\n{exc}")
-            return
-
-        selected_index: Optional[int] = None
-        for entry in entries:
-            symbol_value = str(entry.get("symbol", "")).strip().upper()
-            if not symbol_value:
-                continue
-            label = str(entry.get("label", "")).strip()
-            display_text = f"{symbol_value} — {label}" if label else symbol_value
-            watchlist_symbols.append(symbol_value)
-            current_index = len(watchlist_symbols) - 1
-            watchlist_list.insert("end", display_text)
-            if target_symbol and symbol_value == target_symbol:
-                selected_index = current_index
-            elif not target_symbol and symbol_value == sym:
-                selected_index = current_index
-
-        if not watchlist_symbols:
-            watchlist_list.insert("end", "My Watchlist is empty.")
-            watchlist_list.configure(state=tk.DISABLED)
-        else:
-            watchlist_list.configure(state=tk.NORMAL)
-            if selected_index is not None:
-                watchlist_list.selection_set(selected_index)
-                watchlist_list.see(selected_index)
-
-    target_for_refresh = _consume_last_added_my_watchlist_symbol()
-    _refresh_my_watchlist_list(target_symbol=target_for_refresh)
-
-    def _focus_watchlist_symbol(event=None):
-        selection = watchlist_list.curselection()
-        if not selection or not watchlist_symbols:
-            return
-        index = selection[0]
-        if index >= len(watchlist_symbols):
-            return
-        target_symbol = watchlist_symbols[index]
-        for item in tree.get_children():
-            item_values = tree.item(item)["values"]
-            if item_values and str(item_values[0]).strip().upper() == target_symbol:
-                tree.selection_set(item)
-                tree.focus(item)
-                tree.see(item)
-                break
-
-    watchlist_list.bind("<Double-Button-1>", _focus_watchlist_symbol)
-    watchlist_list.bind("<Return>", _focus_watchlist_symbol)
-
-    tk.Label(
-        watchlist_section,
-        text="Double-click a symbol in the watchlist above to add it here.",
-        font=("Arial", 8),
-        anchor="w",
-        bg="#ffffff",
-        justify="left",
-        wraplength=260,
-    ).pack(fill="x", padx=4, pady=(4, 4))
 
     tk.Label(
         info_panel,
@@ -3279,6 +3318,8 @@ def setup_layout():
     tk.Entry(order_frame, textvariable=sl_var).pack()
 
     tk.Button(order_frame, text="Place Order", command=place_order, bg="blue", fg="white").pack(pady=10)
+
+    _init_my_watchlist_section(order_frame)
 
     tk.Label(root, text="Order Window", font=("Arial", 14, "bold")).pack(anchor="w", padx=10)
     order_frame = tk.Frame(root); order_frame.pack(fill="x", padx=10)
