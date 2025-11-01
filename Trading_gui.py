@@ -2025,11 +2025,16 @@ def show_candlestick():
     sel = tree.selection()
     if not sel:
         return
-    row_values = tree.item(sel[0])["values"]
-    sym = row_values[0]
-    pattern_name = ""
-    if len(row_values) > 6 and row_values[6]:
-        pattern_name = str(row_values[6])
+    item = tree.item(sel[0])
+    row_values = item.get("values", [])
+    columns = tree["columns"] or ()
+
+    value_by_column = {col: row_values[idx] for idx, col in enumerate(columns)}
+
+    sym = str(value_by_column.get("symbol", row_values[0] if row_values else "")).strip()
+
+    pattern_value = value_by_column.get("pattern", "")
+    pattern_name = str(pattern_value).strip() if pattern_value not in (None, "") else ""
     data_file = DATA_DIR / f"{sym}.csv"
     if sym not in symbol_data:
         if data_file.exists():
