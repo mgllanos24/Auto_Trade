@@ -86,7 +86,17 @@ _alpha_vantage_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 INSTITUTION_CACHE_TTL = 60 * 30  # 30 minutes
 QUOTE_SUMMARY_CACHE_TTL = 60 * 15  # 15 minutes
 ALPHAVANTAGE_CACHE_TTL = 60 * 60  # 1 hour
-WATCHLIST_COLUMNS = ["symbol", "breakout_high", "rr_ratio", "target_price", "stop_loss", "timestamp", "pattern", "direction"]
+WATCHLIST_COLUMNS = [
+    "symbol",
+    "last_close",
+    "breakout_high",
+    "target_price",
+    "stop_loss",
+    "rr_ratio",
+    "timestamp",
+    "pattern",
+    "direction",
+]
 MONITOR_FILE = str(SCRIPT_DIR / "active_monitors.json")
 
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY") or os.environ.get("AV_API_KEY")
@@ -167,12 +177,20 @@ def _format_dollar_amount(value: Optional[float]) -> str:
     return f"{sign}${absolute:.2f}"
 
 
-_WATCHLIST_PRICE_COLUMNS = {"breakout_high", "target_price", "stop_loss"}
+_WATCHLIST_PRICE_COLUMNS = {"last_close", "breakout_high", "target_price", "stop_loss"}
 
 
-def _format_watchlist_value(column: str, value: Any) -> str:
+def _format_watchlist_value(column: str, value: Any, row: Optional[dict[str, Any]] = None) -> str:
     if column in _WATCHLIST_PRICE_COLUMNS:
-        return _format_price(value)
+        formatted_value = _format_price(value)
+
+        if column != "last_close" and row is not None:
+            reference_close = _coerce_numeric(row.get("last_close"))
+            if reference_close is not None:
+                formatted_close = _format_price(reference_close)
+                return f"{formatted_value} (last {formatted_close})"
+
+        return formatted_value
 
     if column == "rr_ratio":
         try:
@@ -2677,7 +2695,7 @@ def load_watchlist():
                 values = []
                 for column in WATCHLIST_COLUMNS:
                     raw_value = row.get(column, "") if row else ""
-                    values.append(_format_watchlist_value(column, raw_value))
+                    values.append(_format_watchlist_value(column, raw_value, row))
                 tree.insert("", "end", values=values)
     except Exception as exc:
         messagebox.showerror("Watchlist", f"Failed to load watchlist:\n{exc}")

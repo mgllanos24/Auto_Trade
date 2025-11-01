@@ -64,6 +64,7 @@ def _resolve_watchlist_path() -> Path:
 WATCHLIST_PATH = _resolve_watchlist_path()
 WATCHLIST_HEADER = [
     'symbol',
+    'last_close',
     'breakout_high',
     'rr_ratio',
     'stop_loss',
@@ -1072,10 +1073,33 @@ def calculate_rr_price_action(df, entry_price) -> Optional[RiskRewardLevels]:
         rr_ratio=rr,
     )
 
+def _normalise_watchlist_row(row: list[str]) -> list[str]:
+    """Pad or trim a CSV row so it matches ``WATCHLIST_HEADER``."""
+
+    if len(row) < len(WATCHLIST_HEADER):
+        # Insert an empty placeholder for the newly added ``last_close`` column
+        # right after the symbol.  This keeps backwards compatibility with
+        # watchlists written before the column existed.
+        row = list(row)
+        row.insert(1, "")
+
+    if len(row) > len(WATCHLIST_HEADER):
+        row = row[: len(WATCHLIST_HEADER)]
+
+    return row
+
+
 def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
     path = WATCHLIST_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     volume_3mo = int(df['volume'].tail(60).sum())
+
+    last_close_value = None
+    if df is not None and not df.empty:
+        try:
+            last_close_value = round(float(df['close'].iloc[-1]), 2)
+        except (KeyError, ValueError, TypeError):  # pragma: no cover - defensive
+            last_close_value = None
 
     if rr_levels and rr_levels.breakout is not None:
         breakout_value = round(rr_levels.breakout, 2)
@@ -1090,6 +1114,7 @@ def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
 
     new_entry = [
         symbol,
+        last_close_value,
         breakout_value,
         rr_levels.rr_ratio if rr_levels else None,
         stop_value,
@@ -1103,8 +1128,13 @@ def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
     if path.exists():
         with open(path, 'r') as f:
             reader = csv.reader(f)
-            next(reader, None)
-            existing = {row[0]: row for row in reader if row}
+            header = next(reader, None)
+            existing = {}
+            for row in reader:
+                if not row:
+                    continue
+                normalised = _normalise_watchlist_row(row)
+                existing[normalised[0]] = normalised
     else:
         existing = {}
 
