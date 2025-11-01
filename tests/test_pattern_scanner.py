@@ -79,17 +79,38 @@ def _install_stub_modules() -> None:
         def _diff(values):
             return _Array([values[i + 1] - values[i] for i in range(len(values) - 1)])
 
+        def _argmax(values):
+            if not values:
+                return 0
+            max_idx = 0
+            max_val = values[0]
+            for idx, val in enumerate(values):
+                if val > max_val:
+                    max_idx = idx
+                    max_val = val
+            return max_idx
+
         numpy_stub.array = _array
         numpy_stub.asarray = _array
         numpy_stub.arange = _arange
         numpy_stub.linspace = _linspace
         numpy_stub.diff = _diff
+        numpy_stub.argmax = _argmax
         numpy_stub.any = lambda iterable: any(iterable)
         numpy_stub.abs = abs
         numpy_stub.sum = sum
         numpy_stub.isnan = lambda *args, **kwargs: False
         numpy_stub.ndarray = _Array
+        numpy_stub.less = lambda a, b: a < b
+        numpy_stub.greater = lambda a, b: a > b
         sys.modules["numpy"] = numpy_stub
+
+    numpy_mod = sys.modules.get("numpy")
+    if numpy_mod is not None:
+        if not hasattr(numpy_mod, "less"):
+            numpy_mod.less = lambda a, b: a < b
+        if not hasattr(numpy_mod, "greater"):
+            numpy_mod.greater = lambda a, b: a > b
 
     if "scipy" not in sys.modules:
         sys.modules["scipy"] = types.ModuleType("scipy")
@@ -143,7 +164,13 @@ def _install_stub_modules() -> None:
 
 _install_stub_modules()
 
-from pattern_scanner import detect_double_bottom, detect_ascending_triangle
+import pattern_scanner
+from pattern_scanner import (
+    RiskRewardLevels,
+    calculate_rr_price_action,
+    detect_double_bottom,
+    detect_ascending_triangle,
+)
 
 
 class DummyDataFrame:
@@ -273,3 +300,35 @@ def test_detect_ascending_triangle_rejects_wide_plateau():
     pattern = detect_ascending_triangle(df, window=9, tolerance=0.02, min_touches=2)
 
     assert pattern is None
+
+
+def test_calculate_rr_price_action_uses_recent_swing_high(monkeypatch):
+    highs = [12.0, 13.5, 14.2, 15.0, 14.8, 15.5, 15.2, 16.0, 17.5, 18.0]
+    lows = [10.5, 11.0, 10.8, 11.5, 11.2, 12.0, 11.6, 11.0, 12.8, 13.5]
+    df = _build_price_frame(highs, lows, lows)
+
+    def _matches(expected, actual):
+        if len(expected) != len(actual):
+            return False
+        return all(abs(e - a) < 1e-9 for e, a in zip(expected, actual))
+
+    def fake_argrelextrema(values, _comparator, order=5):
+        seq = list(values)
+        if _matches(lows, seq):
+            return (pattern_scanner.np.array([2, 7]),)
+        if _matches(highs, seq):
+            return (pattern_scanner.np.array([1, 5, 9]),)
+        return (pattern_scanner.np.array([]),)
+
+    monkeypatch.setattr(sys.modules["scipy.signal"], "argrelextrema", fake_argrelextrema)
+
+    entry_price = 16.5
+    rr_levels = calculate_rr_price_action(df, entry_price)
+
+    assert isinstance(rr_levels, RiskRewardLevels)
+    assert rr_levels.breakout == highs[9]
+    assert rr_levels.stop == lows[7]
+    expected_target = highs[9] + (highs[9] - lows[7])
+    assert rr_levels.target == expected_target
+    expected_rr = round((entry_price - lows[7]) / (expected_target - entry_price), 2)
+    assert rr_levels.rr_ratio == expected_rr

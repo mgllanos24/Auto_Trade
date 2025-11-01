@@ -158,6 +158,16 @@ class PrecomputedIndicators:
     volume_slope: Optional[float]
     recent_high_20: Optional[float]
 
+
+@dataclass(frozen=True)
+class RiskRewardLevels:
+    """Container for breakout, stop and target levels."""
+
+    breakout: float
+    stop: float
+    target: float
+    rr_ratio: float
+
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
     'EMB', 'EMXC', 'ESGE', 'ETHA', 'TLT', 'EUFN', 'FDNI', 'TQQQ', 'QQQ', 'QQQM', 'QYLD', 'TSDD',
@@ -1017,7 +1027,7 @@ def is_near_breakout(
         return False
     return abs(last_close - recent_high) / recent_high <= tolerance
 
-def calculate_rr_price_action(df, entry_price):
+def calculate_rr_price_action(df, entry_price) -> Optional[RiskRewardLevels]:
     from scipy.signal import argrelextrema
 
     lows = df['low'].values
@@ -1026,34 +1036,64 @@ def calculate_rr_price_action(df, entry_price):
     swing_highs_idx = argrelextrema(highs, np.greater, order=5)[0]
 
     if len(swing_lows_idx) < 1 or len(swing_highs_idx) < 1:
-        return None, None, None
+        return None
 
-    stop = lows[swing_lows_idx[-1]]
-    recent_low = lows[swing_lows_idx[-1]]
-    recent_high = highs[swing_highs_idx[-1]]
+    last_low_idx = int(swing_lows_idx[-1])
+    recent_low = float(lows[last_low_idx])
+
+    subsequent_highs = [idx for idx in swing_highs_idx if idx > last_low_idx]
+    if subsequent_highs:
+        breakout_idx = int(subsequent_highs[-1])
+    else:
+        trailing_highs = highs[last_low_idx:]
+        if trailing_highs.size == 0:
+            return None
+        breakout_idx = last_low_idx + int(np.argmax(trailing_highs))
+
+    recent_high = float(highs[breakout_idx])
     breakout_height = recent_high - recent_low
-    target = entry_price + breakout_height
+    if breakout_height <= 0:
+        return None
 
-    risk = entry_price - stop
+    breakout = recent_high
+    target = breakout + breakout_height
+
+    risk = entry_price - recent_low
     reward = target - entry_price
 
     if risk <= 0 or reward <= 0:
-        return None, None, None
+        return None
 
     rr = round(risk / reward, 2)
-    return stop, target, rr
+    return RiskRewardLevels(
+        breakout=float(breakout),
+        stop=float(recent_low),
+        target=float(target),
+        rr_ratio=rr,
+    )
 
-def log_watchlist(symbol, pattern, entry, rr, stop, target, df):
+def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
     path = WATCHLIST_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     volume_3mo = int(df['volume'].tail(60).sum())
 
+    if rr_levels and rr_levels.breakout is not None:
+        breakout_value = round(rr_levels.breakout, 2)
+    else:
+        breakout_value = round(entry, 2) if entry is not None else None
+    stop_value = (
+        round(rr_levels.stop, 2) if rr_levels and rr_levels.stop is not None else None
+    )
+    target_value = (
+        round(rr_levels.target, 2) if rr_levels and rr_levels.target is not None else None
+    )
+
     new_entry = [
         symbol,
-        round(entry, 2),
-        rr,
-        round(stop, 2),
-        round(target, 2),
+        breakout_value,
+        rr_levels.rr_ratio if rr_levels else None,
+        stop_value,
+        target_value,
         datetime.now().strftime('%m-%d %H:%M'),
         'bullish',
         pattern,
@@ -1202,14 +1242,20 @@ def scan_all_symbols(symbols):
                     disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
                     continue
 
-            stop, target, rr = calculate_rr_price_action(df, entry)
-            if rr is None or rr > 0.8:
-                print(f" Skipped: RR too high or invalid → RR: {rr}")
-                disqualified.append({'symbol': symbol, 'reason': 'rr too high or invalid', 'entry': entry, 'rr': rr})
+            rr_levels = calculate_rr_price_action(df, entry)
+            if rr_levels is None or rr_levels.rr_ratio > 0.8:
+                rr_value = None if rr_levels is None else rr_levels.rr_ratio
+                print(f" Skipped: RR too high or invalid → RR: {rr_value}")
+                disqualified.append({'symbol': symbol, 'reason': 'rr too high or invalid', 'entry': entry, 'rr': rr_value})
                 continue
 
-            log_watchlist(symbol, pattern, entry, rr, stop, target, df)
-            print(f" Match: {pattern} → Entry: {entry:.2f}, RR: {rr}, Stop: {stop:.2f}, Target: {target:.2f}")
+            log_watchlist(symbol, pattern, entry, rr_levels, df)
+            print(
+                " Match: "
+                f"{pattern} → Breakout: {rr_levels.breakout:.2f}, "
+                f"Entry: {entry:.2f}, RR: {rr_levels.rr_ratio}, "
+                f"Stop: {rr_levels.stop:.2f}, Target: {rr_levels.target:.2f}"
+            )
 
         except Exception as e:
             print(f" Error scanning {symbol}: {e}")
