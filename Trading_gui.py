@@ -287,13 +287,6 @@ def _maybe_refresh_watchlist_row(
 def _format_watchlist_value(column: str, value: Any, row: Optional[dict[str, Any]] = None) -> str:
     if column in _WATCHLIST_PRICE_COLUMNS:
         formatted_value = _format_price(value)
-
-        if column != "last_close" and row is not None:
-            reference_close = _coerce_numeric(row.get("last_close"))
-            if reference_close is not None:
-                formatted_close = _format_price(reference_close)
-                return f"{formatted_value} (last {formatted_close})"
-
         return formatted_value
 
     if column == "rr_ratio":
