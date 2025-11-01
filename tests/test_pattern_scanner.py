@@ -279,6 +279,10 @@ def _build_price_frame(highs, lows, closes):
     )
 
 
+def _extend_price_frame(highs, lows, closes, extra_highs, extra_lows, extra_closes):
+    return _build_price_frame(highs + extra_highs, lows + extra_lows, closes + extra_closes)
+
+
 def test_detect_ascending_triangle_prefers_flat_resistance():
     highs = [10.0, 10.02, 10.01, 9.99, 10.03, 10.02, 10.04, 10.05, 10.6]
     lows = [9.5, 9.55, 9.6, 9.65, 9.7, 9.8, 9.9, 10.0, 10.45]
@@ -298,6 +302,121 @@ def test_detect_ascending_triangle_rejects_wide_plateau():
     df = _build_price_frame(highs, lows, closes)
 
     pattern = detect_ascending_triangle(df, window=9, tolerance=0.02, min_touches=2)
+
+    assert pattern is None
+
+
+def test_detect_bullish_rectangle_identifies_consolidation():
+    flagpole_highs = [50 + 1.5 * i for i in range(15)]
+    flagpole_lows = [value - 0.9 for value in flagpole_highs]
+    flagpole_closes = [low + 0.8 for low in flagpole_lows]
+
+    rectangle_highs = [
+        72.05,
+        71.6,
+        71.7,
+        71.65,
+        72.08,
+        71.58,
+        71.7,
+        71.6,
+        72.1,
+        71.62,
+        71.68,
+        71.6,
+        72.06,
+        71.6,
+        71.7,
+        71.58,
+        72.09,
+        71.6,
+        71.7,
+        71.62,
+    ]
+    rectangle_lows = [
+        68.3,
+        68.0,
+        68.15,
+        68.05,
+        68.25,
+        68.02,
+        68.12,
+        68.03,
+        68.24,
+        68.01,
+        68.1,
+        68.02,
+        68.23,
+        68.0,
+        68.11,
+        68.03,
+        68.22,
+        68.01,
+        68.12,
+        68.05,
+    ]
+    rectangle_closes = [
+        70.1,
+        69.8,
+        69.95,
+        69.9,
+        70.05,
+        69.82,
+        69.94,
+        69.88,
+        70.04,
+        69.82,
+        69.92,
+        69.86,
+        70.03,
+        69.82,
+        69.93,
+        69.85,
+        70.05,
+        69.82,
+        69.94,
+        69.88,
+    ]
+
+    df = _extend_price_frame(
+        flagpole_highs,
+        flagpole_lows,
+        flagpole_closes,
+        rectangle_highs,
+        rectangle_lows,
+        rectangle_closes,
+    )
+
+    window = len(rectangle_highs)
+    pattern = pattern_scanner.detect_bullish_rectangle(df, window=window, tolerance=0.02, min_touches=4)
+
+    assert pattern is not None
+    assert pattern.high == rectangle_highs[8]
+    assert pattern.low == rectangle_lows[1]
+    assert len(pattern.high_touch_indices) >= 4
+    assert len(pattern.low_touch_indices) >= 4
+
+
+def test_detect_bullish_rectangle_rejects_trending_channel():
+    flagpole_highs = [50 + 1.5 * i for i in range(15)]
+    flagpole_lows = [value - 0.9 for value in flagpole_highs]
+    flagpole_closes = [low + 0.8 for low in flagpole_lows]
+
+    channel_highs = [72 + i * 0.4 for i in range(20)]
+    channel_lows = [high - 1.2 for high in channel_highs]
+    channel_closes = [low + 0.9 for low in channel_lows]
+
+    df = _extend_price_frame(
+        flagpole_highs,
+        flagpole_lows,
+        flagpole_closes,
+        channel_highs,
+        channel_lows,
+        channel_closes,
+    )
+
+    window = len(channel_highs)
+    pattern = pattern_scanner.detect_bullish_rectangle(df, window=window, tolerance=0.02, min_touches=4)
 
     assert pattern is None
 
