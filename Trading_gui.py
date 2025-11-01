@@ -53,6 +53,7 @@ from pattern_scanner import (
     detect_bullish_rectangle,
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
+    load_pattern_dataclass,
     WATCHLIST_PATH,
     WATCHLIST_HEADER,
 )
@@ -197,6 +198,15 @@ def _mark_last_added_my_watchlist_symbol(symbol: str) -> None:
     global _LAST_ADDED_MY_WATCHLIST_SYMBOL
     normalized = (symbol or "").strip().upper()
     _LAST_ADDED_MY_WATCHLIST_SYMBOL = normalized or None
+
+
+def _load_persisted_pattern(symbol: str, pattern_name: str, cls: type[Any]):
+    if not symbol or not pattern_name:
+        return None
+    try:
+        return load_pattern_dataclass(symbol, pattern_name, cls)
+    except Exception:
+        return None
 
 
 def _consume_last_added_my_watchlist_symbol() -> Optional[str]:
@@ -2772,54 +2782,59 @@ def show_candlestick():
                     window=60,
                     require_breakout=False,
                 )
+
+            hit: Optional[DoubleBottomHit] = None
             if hits:
                 hit = max(hits, key=lambda h: h.right_idx)
-                if isinstance(hit, DoubleBottomHit):
-                    try:
-                        left_idx = hit.left_idx
-                        right_idx = hit.right_idx
-                        support = hit.support
+            if hit is None:
+                hit = _load_persisted_pattern(sym, pattern_name, DoubleBottomHit)
 
-                        if 0 <= left_idx < len(plot_df) and 0 <= right_idx < len(plot_df):
-                            ax_price.axhline(support, color='#1f77b4', linestyle='--', linewidth=1.5, label='Support')
+            if isinstance(hit, DoubleBottomHit):
+                try:
+                    left_idx = hit.left_idx
+                    right_idx = hit.right_idx
+                    support = hit.support
+
+                    if 0 <= left_idx < len(plot_df) and 0 <= right_idx < len(plot_df):
+                        ax_price.axhline(support, color='#1f77b4', linestyle='--', linewidth=1.5, label='Support')
+                        overlay_added = True
+
+                        ax_price.scatter(
+                            [plot_df['Date'].iloc[left_idx], plot_df['Date'].iloc[right_idx]],
+                            [hit.left_low, hit.right_low],
+                            color='#d62728',
+                            zorder=5,
+                            label='Swing Low',
+                        )
+                        overlay_added = True
+
+                        indices = np.arange(left_idx, right_idx + 1)
+                        highs_segment = analysis_df['high'].iloc[left_idx:right_idx + 1].to_numpy()
+                        if highs_segment.size >= 2 and np.all(np.isfinite(highs_segment)):
+                            slope, intercept = np.polyfit(indices, highs_segment, 1)
+                            line_idx = np.array([left_idx, right_idx])
+                            line_prices = slope * line_idx + intercept
+                            line_dates = plot_df['Date'].iloc[[left_idx, right_idx]].to_numpy()
+                            ax_price.plot(line_dates, line_prices, color='#9467bd', linewidth=1.5, label='Neckline')
                             overlay_added = True
 
-                            ax_price.scatter(
-                                [plot_df['Date'].iloc[left_idx], plot_df['Date'].iloc[right_idx]],
-                                [hit.left_low, hit.right_low],
-                                color='#d62728',
-                                zorder=5,
-                                label='Swing Low',
-                            )
-                            overlay_added = True
-
-                            indices = np.arange(left_idx, right_idx + 1)
-                            highs_segment = analysis_df['high'].iloc[left_idx:right_idx + 1].to_numpy()
-                            if highs_segment.size >= 2 and np.all(np.isfinite(highs_segment)):
-                                slope, intercept = np.polyfit(indices, highs_segment, 1)
-                                line_idx = np.array([left_idx, right_idx])
-                                line_prices = slope * line_idx + intercept
-                                line_dates = plot_df['Date'].iloc[[left_idx, right_idx]].to_numpy()
-                                ax_price.plot(line_dates, line_prices, color='#9467bd', linewidth=1.5, label='Neckline')
+                            if hit.breakout_idx is not None and 0 <= hit.breakout_idx < len(plot_df):
+                                breakout_date = plot_df['Date'].iloc[hit.breakout_idx]
+                                breakout_price = hit.breakout_price if hit.breakout_price is not None else float(
+                                    slope * hit.breakout_idx + intercept
+                                )
+                                ax_price.scatter(
+                                    [breakout_date],
+                                    [breakout_price],
+                                    color='#ff7f0e',
+                                    marker='^',
+                                    s=60,
+                                    zorder=6,
+                                    label='Breakout',
+                                )
                                 overlay_added = True
-
-                                if hit.breakout_idx is not None and 0 <= hit.breakout_idx < len(plot_df):
-                                    breakout_date = plot_df['Date'].iloc[hit.breakout_idx]
-                                    breakout_price = hit.breakout_price if hit.breakout_price is not None else float(
-                                        slope * hit.breakout_idx + intercept
-                                    )
-                                    ax_price.scatter(
-                                        [breakout_date],
-                                        [breakout_price],
-                                        color='#ff7f0e',
-                                        marker='^',
-                                        s=60,
-                                        zorder=6,
-                                        label='Breakout',
-                                    )
-                                    overlay_added = True
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
         elif name_lower == "cup and handle":
             hit = detect_cup_and_handle(analysis_df, cup_window=60, handle_window=15)
             if not hit:
@@ -2829,6 +2844,8 @@ def show_candlestick():
                     cup_window=60,
                     handle_window=15,
                 )
+            if not hit:
+                hit = _load_persisted_pattern(sym, pattern_name, CupHandleHit)
             if isinstance(hit, CupHandleHit):
                 resistance = hit.resistance
                 ax_price.axhline(
@@ -2899,6 +2916,8 @@ def show_candlestick():
                     analysis_df,
                     min_size=60,
                 )
+            if not ihs:
+                ihs = _load_persisted_pattern(sym, pattern_name, InverseHeadShouldersPattern)
             if isinstance(ihs, InverseHeadShouldersPattern):
                 try:
                     indices = [ihs.left_idx, ihs.head_idx, ihs.right_idx]
@@ -2952,6 +2971,8 @@ def show_candlestick():
                     tolerance=0.02,
                     min_touches=2,
                 )
+            if not triangle:
+                triangle = _load_persisted_pattern(sym, pattern_name, AscendingTrianglePattern)
             if isinstance(triangle, AscendingTrianglePattern):
                 start_idx = triangle.offset
                 end_idx = triangle.offset + triangle.length - 1
@@ -3009,6 +3030,8 @@ def show_candlestick():
                     window=60,
                     flagpole_window=20,
                 )
+            if not pennant:
+                pennant = _load_persisted_pattern(sym, pattern_name, BullishPennantPattern)
             if isinstance(pennant, BullishPennantPattern):
                 start_idx = pennant.offset
                 end_idx = pennant.offset + pennant.length - 1
@@ -3031,6 +3054,8 @@ def show_candlestick():
                     window=40,
                     flagpole_window=20,
                 )
+            if not flag:
+                flag = _load_persisted_pattern(sym, pattern_name, BullishFlagPattern)
             if isinstance(flag, BullishFlagPattern):
                 start_idx = flag.offset
                 end_idx = flag.offset + flag.length - 1
@@ -3052,6 +3077,8 @@ def show_candlestick():
                     analysis_df,
                     window=60,
                 )
+            if not rectangle:
+                rectangle = _load_persisted_pattern(sym, pattern_name, BullishRectanglePattern)
             if isinstance(rectangle, BullishRectanglePattern):
                 start_idx = rectangle.offset
                 end_idx = rectangle.offset + rectangle.length - 1
@@ -3068,6 +3095,8 @@ def show_candlestick():
                     analysis_df,
                     window=100,
                 )
+            if not rounding:
+                rounding = _load_persisted_pattern(sym, pattern_name, RoundingBottomPattern)
             if isinstance(rounding, RoundingBottomPattern):
                 start_idx = rounding.offset
                 end_idx = rounding.offset + rounding.length - 1
@@ -3088,6 +3117,8 @@ def show_candlestick():
                     analysis_df,
                     min_size=35,
                 )
+            if not gap:
+                gap = _load_persisted_pattern(sym, pattern_name, BreakawayGapPattern)
             if isinstance(gap, BreakawayGapPattern):
                 prev_idx = gap.prev_close_idx
                 curr_idx = gap.curr_open_idx
