@@ -73,6 +73,7 @@ DATA_DIR = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+MY_WATCHLIST_PATH = DATA_DIR / "my_watchlist.json"
 
 root = tk.Tk()
 root.title("Stock Scanner GUI")
@@ -342,6 +343,74 @@ def _read_watchlist_rows() -> tuple[list[str], list[dict[str, Any]]]:
                 continue
             rows.append({key: raw_row.get(key, "") for key in fieldnames})
     return fieldnames, rows
+
+
+def _read_my_watchlist_entries() -> list[dict[str, str]]:
+    """Return the persisted "My Watchlist" entries."""
+
+    if not MY_WATCHLIST_PATH.exists():
+        return []
+
+    with MY_WATCHLIST_PATH.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    entries: list[dict[str, str]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                entries.append({"symbol": item.strip().upper(), "label": ""})
+            elif isinstance(item, dict):
+                symbol = str(item.get("symbol", "")).strip().upper()
+                label = str(item.get("label", "")).strip()
+                if symbol:
+                    entries.append({"symbol": symbol, "label": label})
+    return entries
+
+
+def _write_my_watchlist_entries(entries: Sequence[dict[str, str]]) -> None:
+    serialised: list[dict[str, str]] = []
+    for entry in entries:
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        label = str(entry.get("label", "")).strip()
+        serialised.append({"symbol": symbol, "label": label})
+
+    MY_WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with MY_WATCHLIST_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(serialised, handle, ensure_ascii=False, indent=2)
+
+
+def add_symbol_to_my_watchlist(symbol: str, *, label: str = "") -> bool:
+    """Add the provided symbol to the personalised "My Watchlist" list."""
+
+    normalized = (symbol or "").strip().upper()
+    if not normalized:
+        messagebox.showerror("My Watchlist", "Please provide a valid ticker symbol.")
+        return False
+
+    try:
+        entries = _read_my_watchlist_entries()
+    except Exception as exc:  # pragma: no cover - defensive GUI feedback
+        messagebox.showerror("My Watchlist", f"Failed to read My Watchlist:\n{exc}")
+        return False
+
+    existing: dict[str, dict[str, str]] = {entry["symbol"]: dict(entry) for entry in entries if entry.get("symbol")}
+    entry = existing.get(normalized)
+    if entry is None:
+        entry = {"symbol": normalized, "label": label.strip()}
+        entries.append(entry)
+    else:
+        if not entry.get("label") and label:
+            entry["label"] = label.strip()
+
+    try:
+        _write_my_watchlist_entries(entries)
+    except Exception as exc:  # pragma: no cover - defensive GUI feedback
+        messagebox.showerror("My Watchlist", f"Failed to update My Watchlist:\n{exc}")
+        return False
+
+    return True
 
 
 def add_symbol_to_watchlist(symbol: str, *, source_label: str = "Screener Candidate") -> bool:
@@ -2035,7 +2104,7 @@ def show_candlestick():
 
     tk.Label(
         info_panel,
-        text="Watchlist",
+        text="My Watchlist",
         font=("Arial", 11, "bold"),
         anchor="w",
         bg="#f5f5f5",
@@ -2063,35 +2132,48 @@ def show_candlestick():
     watchlist_list.configure(yscrollcommand=watchlist_scroll.set)
 
     watchlist_symbols: list[str] = []
-    selected_index: Optional[int] = None
-    for iid in tree.get_children():
-        values = tree.item(iid)["values"]
-        if not values:
-            continue
-        symbol_value = str(values[0]).strip().upper()
-        pattern_value = ""
-        if len(values) > 7 and values[7]:
-            pattern_value = str(values[7])
-        display_pattern = pattern_value if pattern_value else "—"
-        display_text = f"{symbol_value} — {display_pattern}"
-        watchlist_symbols.append(symbol_value)
-        current_index = len(watchlist_symbols) - 1
-        watchlist_list.insert("end", display_text)
-        if symbol_value == sym:
-            selected_index = current_index
 
-    if not watchlist_symbols:
-        watchlist_list.insert("end", "Watchlist is empty.")
-        watchlist_list.configure(state=tk.DISABLED)
-    else:
-        watchlist_list.configure(state=tk.NORMAL)
-        if selected_index is not None:
-            watchlist_list.selection_set(selected_index)
-            watchlist_list.see(selected_index)
+    def _refresh_my_watchlist_list(target_symbol: Optional[str] = None):
+        watchlist_list.delete(0, tk.END)
+        watchlist_symbols.clear()
+
+        try:
+            entries = _read_my_watchlist_entries()
+        except Exception as exc:  # pragma: no cover - defensive GUI feedback
+            watchlist_list.insert("end", "Unable to load My Watchlist.")
+            watchlist_list.configure(state=tk.DISABLED)
+            messagebox.showwarning("My Watchlist", f"Failed to load My Watchlist:\n{exc}")
+            return
+
+        selected_index: Optional[int] = None
+        for entry in entries:
+            symbol_value = str(entry.get("symbol", "")).strip().upper()
+            if not symbol_value:
+                continue
+            label = str(entry.get("label", "")).strip()
+            display_text = f"{symbol_value} — {label}" if label else symbol_value
+            watchlist_symbols.append(symbol_value)
+            current_index = len(watchlist_symbols) - 1
+            watchlist_list.insert("end", display_text)
+            if target_symbol and symbol_value == target_symbol:
+                selected_index = current_index
+            elif not target_symbol and symbol_value == sym:
+                selected_index = current_index
+
+        if not watchlist_symbols:
+            watchlist_list.insert("end", "My Watchlist is empty.")
+            watchlist_list.configure(state=tk.DISABLED)
+        else:
+            watchlist_list.configure(state=tk.NORMAL)
+            if selected_index is not None:
+                watchlist_list.selection_set(selected_index)
+                watchlist_list.see(selected_index)
+
+    _refresh_my_watchlist_list()
 
     def _focus_watchlist_symbol(event=None):
         selection = watchlist_list.curselection()
-        if not selection:
+        if not selection or not watchlist_symbols:
             return
         index = selection[0]
         if index >= len(watchlist_symbols):
@@ -2110,7 +2192,7 @@ def show_candlestick():
 
     tk.Label(
         watchlist_section,
-        text="Add symbol from screener:",
+        text="Add symbol to My Watchlist:",
         font=("Arial", 9),
         anchor="w",
         bg="#ffffff",
@@ -2127,9 +2209,10 @@ def show_candlestick():
     def _handle_add_from_screener(event=None):
         ticker = screener_symbol_var.get().strip().upper()
         if not ticker:
-            messagebox.showerror("Watchlist", "Enter a symbol from your screener.")
+            messagebox.showerror("My Watchlist", "Enter a symbol to add.")
             return "break"
         if add_symbol_to_watchlist(ticker):
+            added_to_my_list = add_symbol_to_my_watchlist(ticker)
             screener_symbol_var.set("")
             load_watchlist()
 
@@ -2143,6 +2226,7 @@ def show_candlestick():
                         break
 
             root.after(0, _select_new)
+            _refresh_my_watchlist_list(target_symbol=ticker if added_to_my_list else None)
         return "break"
 
     screener_entry.bind("<Return>", _handle_add_from_screener)
