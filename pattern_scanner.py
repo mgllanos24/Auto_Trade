@@ -1155,25 +1155,100 @@ def detect_bullish_rectangle(
         return None
 
     recent = df.tail(window)
-    high = float(recent['high'].max())
-    low = float(recent['low'].min())
-    if high == 0 or low == 0:
+    highs = [float(value) for value in recent['high'].values]
+    lows = [float(value) for value in recent['low'].values]
+    closes = [float(value) for value in recent['close'].values]
+
+    if not highs or not lows:
         return None
 
-    high_touch_indices = [
-        idx for idx, value in enumerate(recent['high'].values) if abs(value - high) / high < tolerance
-    ]
-    low_touch_indices = [
-        idx for idx, value in enumerate(recent['low'].values) if abs(value - low) / low < tolerance
-    ]
+    high_level = max(highs)
+    low_level = min(lows)
+    if high_level <= 0 or low_level <= 0:
+        return None
+
+    range_pct = (high_level - low_level) / high_level
+    if range_pct > 0.06:
+        return None
+
+    def _collect_touches(values, extreme, is_high: bool) -> List[int]:
+        if extreme == 0:
+            return []
+        candidates = [
+            idx
+            for idx, value in enumerate(values)
+            if abs(value - extreme) / abs(extreme) <= tolerance
+        ]
+        if not candidates:
+            return []
+        deduped: List[int] = []
+        for idx in sorted(candidates):
+            if deduped and idx - deduped[-1] <= 2:
+                if is_high:
+                    better = idx if values[idx] >= values[deduped[-1]] else deduped[-1]
+                else:
+                    better = idx if values[idx] <= values[deduped[-1]] else deduped[-1]
+                deduped[-1] = better
+            else:
+                deduped.append(int(idx))
+        return deduped
+
+    high_touch_indices = _collect_touches(highs, high_level, True)
+    low_touch_indices = _collect_touches(lows, low_level, False)
 
     if len(high_touch_indices) < min_touches or len(low_touch_indices) < min_touches:
         return None
 
-    offset = len(df) - len(recent)
+    half = max(len(highs) // 2, 1)
+    if not (
+        any(idx < half for idx in high_touch_indices)
+        and any(idx >= half for idx in high_touch_indices)
+        and any(idx < half for idx in low_touch_indices)
+        and any(idx >= half for idx in low_touch_indices)
+    ):
+        return None
+
+    combined_sequence = sorted(
+        [(idx, "H") for idx in high_touch_indices] + [(idx, "L") for idx in low_touch_indices],
+        key=lambda item: item[0],
+    )
+    transitions = sum(1 for (_, prev), (_, curr) in zip(combined_sequence, combined_sequence[1:]) if prev != curr)
+    if transitions < 3:
+        return None
+
+    allowed_high = high_level * (1 + tolerance * 1.5)
+    allowed_low = low_level * (1 - tolerance * 1.5)
+    breaches = sum(1 for high, low in zip(highs, lows) if high > allowed_high or low < allowed_low)
+    if breaches > max(2, int(0.1 * len(highs))):
+        return None
+
+    if len(closes) >= 2:
+        x = [[idx] for idx in range(len(closes))]
+        lr = LinearRegression().fit(x, closes)
+        slope = float(lr.coef_[0])
+        avg_price = sum(closes) / len(closes)
+        if avg_price != 0 and abs(slope) / abs(avg_price) > 0.0025:
+            return None
+
+    total_len = len(df)
+    pole_window = min(20, max(total_len - len(recent), 0))
+    if pole_window >= 5:
+        combined = df.tail(len(recent) + pole_window)
+        combined_closes = [float(value) for value in combined['close'].values]
+        flagpole_closes = combined_closes[:pole_window]
+        if len(flagpole_closes) >= 2:
+            start_price = flagpole_closes[0]
+            end_price = flagpole_closes[-1]
+            if start_price == 0:
+                return None
+            gain = end_price / start_price
+            if gain < 1.08:
+                return None
+
+    offset = total_len - len(recent)
     return BullishRectanglePattern(
-        high=high,
-        low=low,
+        high=high_level,
+        low=low_level,
         offset=offset,
         length=len(recent),
         high_touch_indices=[offset + idx for idx in high_touch_indices],
