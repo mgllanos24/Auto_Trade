@@ -185,6 +185,25 @@ _WATCHLIST_PRICE_COLUMNS = {"last_close", "breakout_high", "target_price", "stop
 _WATCHLIST_REFRESH_CACHE: dict[str, tuple[float, Optional[float]]] = {}
 _WATCHLIST_REFRESH_TTL = 60 * 5
 
+_LAST_ADDED_MY_WATCHLIST_SYMBOL: Optional[str] = None
+
+
+def _mark_last_added_my_watchlist_symbol(symbol: str) -> None:
+    """Record the most recently added My Watchlist symbol."""
+
+    global _LAST_ADDED_MY_WATCHLIST_SYMBOL
+    normalized = (symbol or "").strip().upper()
+    _LAST_ADDED_MY_WATCHLIST_SYMBOL = normalized or None
+
+
+def _consume_last_added_my_watchlist_symbol() -> Optional[str]:
+    """Return and clear the pending My Watchlist symbol highlight."""
+
+    global _LAST_ADDED_MY_WATCHLIST_SYMBOL
+    symbol = _LAST_ADDED_MY_WATCHLIST_SYMBOL
+    _LAST_ADDED_MY_WATCHLIST_SYMBOL = None
+    return symbol
+
 
 def _extract_fast_info_price(fast_info: Any) -> Optional[float]:
     if fast_info is None:
@@ -2169,7 +2188,8 @@ def show_candlestick():
                 watchlist_list.selection_set(selected_index)
                 watchlist_list.see(selected_index)
 
-    _refresh_my_watchlist_list()
+    target_for_refresh = _consume_last_added_my_watchlist_symbol()
+    _refresh_my_watchlist_list(target_symbol=target_for_refresh)
 
     def _focus_watchlist_symbol(event=None):
         selection = watchlist_list.curselection()
@@ -2192,46 +2212,13 @@ def show_candlestick():
 
     tk.Label(
         watchlist_section,
-        text="Add symbol to My Watchlist:",
-        font=("Arial", 9),
+        text="Double-click a symbol in the watchlist above to add it here.",
+        font=("Arial", 8),
         anchor="w",
         bg="#ffffff",
-    ).pack(fill="x", padx=4, pady=(0, 2))
-
-    add_row = tk.Frame(watchlist_section, bg="#ffffff")
-    add_row.pack(fill="x", padx=4, pady=(0, 4))
-
-    screener_symbol_var = tk.StringVar()
-
-    screener_entry = tk.Entry(add_row, textvariable=screener_symbol_var)
-    screener_entry.pack(side="left", fill="x", expand=True)
-
-    def _handle_add_from_screener(event=None):
-        ticker = screener_symbol_var.get().strip().upper()
-        if not ticker:
-            messagebox.showerror("My Watchlist", "Enter a symbol to add.")
-            return "break"
-        if add_symbol_to_watchlist(ticker):
-            added_to_my_list = add_symbol_to_my_watchlist(ticker)
-            screener_symbol_var.set("")
-            load_watchlist()
-
-            def _select_new():
-                for item in tree.get_children():
-                    item_values = tree.item(item)["values"]
-                    if item_values and str(item_values[0]).strip().upper() == ticker:
-                        tree.selection_set(item)
-                        tree.focus(item)
-                        tree.see(item)
-                        break
-
-            root.after(0, _select_new)
-            _refresh_my_watchlist_list(target_symbol=ticker if added_to_my_list else None)
-        return "break"
-
-    screener_entry.bind("<Return>", _handle_add_from_screener)
-
-    tk.Button(add_row, text="Add", command=_handle_add_from_screener).pack(side="left", padx=(4, 0))
+        justify="left",
+        wraplength=260,
+    ).pack(fill="x", padx=4, pady=(4, 4))
 
     tk.Label(
         info_panel,
@@ -3239,6 +3226,22 @@ def setup_layout():
         tree.column(col, width=110, anchor="center")
     tree.pack(side="left", fill="x", expand=True)
     ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview).pack(side="right", fill="y")
+
+    def _handle_tree_double_click(event):
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+        values = tree.item(item_id).get("values")
+        if not values:
+            return
+        symbol = str(values[0]).strip().upper()
+        if not symbol:
+            return
+        if add_symbol_to_my_watchlist(symbol):
+            _mark_last_added_my_watchlist_symbol(symbol)
+            show_candlestick()
+
+    tree.bind("<Double-1>", _handle_tree_double_click)
 
     middle = tk.Frame(root); middle.pack(fill="both", expand=True, padx=10)
     chart_frame = tk.Frame(middle); chart_frame.pack(side="left", fill="both", expand=True)
