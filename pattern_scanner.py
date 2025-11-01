@@ -1,5 +1,6 @@
 import alpaca_trade_api as tradeapi
 import pandas as pd
+import json
 import yfinance as yf
 import os
 import csv
@@ -11,8 +12,9 @@ from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from dataclasses import dataclass, asdict, is_dataclass
+from collections.abc import Sequence as ABCSequence
+from typing import Any, Dict, List, Optional, Sequence, Union, get_args, get_origin
 
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
 from swing_trading_screener import (
@@ -51,6 +53,10 @@ def _resolve_data_dir() -> Path:
 DATA_DIR = _resolve_data_dir()
 CACHE_DIR = DATA_DIR / "yf_cache"
 CACHE_TTL = timedelta(minutes=30)
+PATTERN_DETAILS_DIR = DATA_DIR / "pattern_details"
+
+
+_PD_TIMESTAMP = getattr(pd, "Timestamp", None)
 
 
 def _resolve_watchlist_path() -> Path:
@@ -177,6 +183,177 @@ class PatternCandidate:
     name: str
     confidence: float
     details: Any = None
+
+# ---------------------------------------------------------------------------
+# Pattern detail persistence helpers
+
+
+def _pattern_key(name: str) -> str:
+    normalized = " ".join(str(name or "").strip().lower().split())
+    return normalized
+
+
+def _normalize_for_json(value: Any) -> Any:
+    if isinstance(value, (float, int, bool)) or value is None:
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(_PD_TIMESTAMP, type) and isinstance(value, _PD_TIMESTAMP):
+        return value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _normalize_for_json(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_for_json(item) for item in value]
+    if is_dataclass(value):
+        return _normalize_for_json(asdict(value))
+    if isinstance(value, np.generic):
+        return value.item()
+    if hasattr(value, "tolist"):
+        try:
+            return [_normalize_for_json(item) for item in value.tolist()]
+        except Exception:  # pragma: no cover - defensive
+            return value
+    return value
+
+
+def _ensure_pattern_details_dir() -> None:
+    PATTERN_DETAILS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_pattern_file(symbol: str) -> Dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return {}
+    path = PATTERN_DETAILS_DIR / f"{normalized_symbol}.json"
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:  # pragma: no cover - defensive
+        return {}
+    return {}
+
+
+def _write_pattern_file(symbol: str, data: Dict[str, Any]) -> None:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return
+    _ensure_pattern_details_dir()
+    path = PATTERN_DETAILS_DIR / f"{normalized_symbol}.json"
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def save_pattern_details(symbol: str, pattern_name: str, details: Any) -> None:
+    if not pattern_name:
+        return
+    if details is None:
+        return
+
+    if is_dataclass(details):
+        payload_details = asdict(details)
+    elif isinstance(details, dict):
+        payload_details = dict(details)
+    else:
+        # Fall back to the object's dictionary if available
+        payload_details = getattr(details, "__dict__", None)
+        if not isinstance(payload_details, dict):
+            return
+
+    normalized_details = _normalize_for_json(payload_details)
+    store = _load_pattern_file(symbol)
+    key = _pattern_key(pattern_name)
+    store[key] = {
+        "pattern": pattern_name,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "details": normalized_details,
+    }
+    _write_pattern_file(symbol, store)
+
+
+def load_pattern_details(symbol: str, pattern_name: str) -> Optional[Dict[str, Any]]:
+    if not pattern_name:
+        return None
+    store = _load_pattern_file(symbol)
+    if not store:
+        return None
+    key = _pattern_key(pattern_name)
+    entry = store.get(key)
+    if entry:
+        return entry
+    for candidate in store.values():
+        if not isinstance(candidate, dict):
+            continue
+        if _pattern_key(candidate.get("pattern", "")) == key:
+            return candidate
+    return None
+
+
+def _convert_field_value(field_type: Any, value: Any) -> Any:
+    if value is None:
+        return None
+
+    origin = get_origin(field_type)
+    if origin in (list, tuple, set):
+        item_type = get_args(field_type)[0] if get_args(field_type) else Any
+        converted = [_convert_field_value(item_type, item) for item in value]
+        if origin is tuple:
+            return tuple(converted)
+        if origin is set:
+            return set(converted)
+        return converted
+    if origin is ABCSequence:
+        item_type = get_args(field_type)[0] if get_args(field_type) else Any
+        return [_convert_field_value(item_type, item) for item in value]
+    if origin is Union:
+        args = [arg for arg in get_args(field_type) if arg is not type(None)]
+        if len(args) == 1:
+            return _convert_field_value(args[0], value)
+        return value
+
+    if field_type is float:
+        return float(value)
+    if field_type is int:
+        return int(value)
+    if field_type is bool:
+        return bool(value)
+    if field_type is str:
+        return str(value)
+    if field_type is datetime:
+        return datetime.fromisoformat(value)
+    if isinstance(_PD_TIMESTAMP, type) and field_type is _PD_TIMESTAMP:
+        return pd.Timestamp(value)
+
+    return value
+
+
+def _dataclass_from_dict(cls: Any, data: Dict[str, Any]):
+    if not isinstance(data, dict):
+        return None
+    try:
+        field_values = {}
+        for field in getattr(cls, "__dataclass_fields__", {}).values():
+            field_name = field.name
+            raw_value = data.get(field_name)
+            field_values[field_name] = _convert_field_value(field.type, raw_value)
+        return cls(**field_values)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def load_pattern_dataclass(symbol: str, pattern_name: str, cls: Any):
+    entry = load_pattern_details(symbol, pattern_name)
+    if not entry or not isinstance(entry, dict):
+        return None
+    details = entry.get("details")
+    if not isinstance(details, dict):
+        return None
+    return _dataclass_from_dict(cls, details)
 
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
@@ -1322,7 +1499,14 @@ def _normalise_watchlist_row(row: list[str]) -> list[str]:
     return row
 
 
-def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
+def log_watchlist(
+    symbol,
+    pattern,
+    entry,
+    rr_levels: RiskRewardLevels,
+    df,
+    pattern_details: Optional[Any] = None,
+):
     path = WATCHLIST_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     volume_3mo = int(df['volume'].tail(60).sum())
@@ -1377,6 +1561,12 @@ def log_watchlist(symbol, pattern, entry, rr_levels: RiskRewardLevels, df):
         writer = csv.writer(f)
         writer.writerow(WATCHLIST_HEADER)
         writer.writerows(sorted(existing.values(), key=lambda x: x[0]))
+
+    if pattern_details is not None:
+        try:
+            save_pattern_details(symbol, pattern, pattern_details)
+        except Exception:
+            pass
 
 
 def initialize_watchlist():
@@ -1484,7 +1674,14 @@ def scan_all_symbols(symbols):
                 disqualified.append({'symbol': symbol, 'reason': 'rr too high or invalid', 'entry': entry, 'rr': rr_value})
                 continue
 
-            log_watchlist(symbol, pattern, entry, rr_levels, df)
+            log_watchlist(
+                symbol,
+                pattern,
+                entry,
+                rr_levels,
+                df,
+                pattern_details=best_candidate.details,
+            )
             print(
                 " Match: "
                 f"{pattern} → Breakout: {rr_levels.breakout:.2f}, "
