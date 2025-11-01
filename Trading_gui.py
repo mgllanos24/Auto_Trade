@@ -29,7 +29,7 @@ import signal
 import json
 import csv
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
@@ -305,6 +305,101 @@ def _format_watchlist_value(column: str, value: Any, row: Optional[dict[str, Any
         return ""
 
     return str(value)
+
+
+def _normalise_watchlist_fieldnames(fieldnames: Sequence[str] | None) -> list[str]:
+    """Return a normalised list of watchlist fieldnames."""
+
+    normalised = list(fieldnames or [])
+
+    if "symbol" in normalised and "last_close" not in normalised:
+        insert_at = normalised.index("symbol") + 1
+        normalised.insert(insert_at, "last_close")
+    elif "last_close" not in normalised:
+        normalised.append("last_close")
+
+    seen = set(normalised)
+    for column in WATCHLIST_HEADER:
+        if column not in seen:
+            normalised.append(column)
+            seen.add(column)
+
+    return normalised
+
+
+def _read_watchlist_rows() -> tuple[list[str], list[dict[str, Any]]]:
+    """Read the persisted watchlist file and return its rows."""
+
+    if not WATCHLIST_PATH.exists():
+        return list(WATCHLIST_HEADER), []
+
+    with WATCHLIST_PATH.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = _normalise_watchlist_fieldnames(reader.fieldnames or WATCHLIST_HEADER)
+        rows: list[dict[str, Any]] = []
+        for raw_row in reader:
+            if not raw_row:
+                continue
+            rows.append({key: raw_row.get(key, "") for key in fieldnames})
+    return fieldnames, rows
+
+
+def add_symbol_to_watchlist(symbol: str, *, source_label: str = "Screener Candidate") -> bool:
+    """Persist a manually provided symbol to the shared watchlist."""
+
+    normalized = (symbol or "").strip().upper()
+    if not normalized:
+        messagebox.showerror("Watchlist", "Please provide a valid ticker symbol.")
+        return False
+
+    try:
+        fieldnames, rows = _read_watchlist_rows()
+    except Exception as exc:  # pragma: no cover - defensive GUI feedback
+        messagebox.showerror("Watchlist", f"Failed to read the watchlist:\n{exc}")
+        return False
+
+    entries: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_symbol = (row.get("symbol") or "").strip().upper()
+        if row_symbol:
+            entries[row_symbol] = {key: row.get(key, "") for key in fieldnames}
+
+    if normalized in entries:
+        entry = entries[normalized]
+    else:
+        entry = {key: "" for key in fieldnames}
+
+    entry["symbol"] = normalized
+    if source_label and not entry.get("pattern"):
+        entry["pattern"] = source_label
+
+    if "direction" in fieldnames and not entry.get("direction"):
+        entry["direction"] = "bullish"
+
+    entry["timestamp"] = datetime.now().strftime("%m-%d %H:%M")
+
+    price_cache: dict[str, Optional[float]] = {}
+    _maybe_refresh_watchlist_row(entry, price_cache)
+
+    entries[normalized] = entry
+
+    serialised_rows = [
+        {key: value if value is not None else "" for key, value in entries[symbol_key].items() if key in fieldnames}
+        for symbol_key in sorted(entries)
+    ]
+
+    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with WATCHLIST_PATH.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in serialised_rows:
+                writer.writerow({key: row.get(key, "") for key in fieldnames})
+    except Exception as exc:  # pragma: no cover - defensive GUI feedback
+        messagebox.showerror("Watchlist", f"Failed to update the watchlist:\n{exc}")
+        return False
+
+    return True
 
 
 def _coerce_numeric(value: Any) -> Optional[float]:
@@ -1940,6 +2035,122 @@ def show_candlestick():
 
     tk.Label(
         info_panel,
+        text="Watchlist",
+        font=("Arial", 11, "bold"),
+        anchor="w",
+        bg="#f5f5f5",
+    ).pack(fill="x", padx=4, pady=(4, 0))
+
+    watchlist_section = tk.Frame(info_panel, bg="#ffffff", bd=1, relief="solid")
+    watchlist_section.pack(fill="x", padx=4, pady=(2, 8))
+
+    list_container = tk.Frame(watchlist_section, bg="#ffffff")
+    list_container.pack(fill="x", padx=4, pady=(4, 2))
+
+    watchlist_list = tk.Listbox(
+        list_container,
+        height=8,
+        exportselection=False,
+        activestyle="none",
+        bg="#ffffff",
+        bd=0,
+        highlightthickness=0,
+    )
+    watchlist_list.pack(side="left", fill="x", expand=True)
+
+    watchlist_scroll = ttk.Scrollbar(list_container, orient="vertical", command=watchlist_list.yview)
+    watchlist_scroll.pack(side="right", fill="y")
+    watchlist_list.configure(yscrollcommand=watchlist_scroll.set)
+
+    watchlist_symbols: list[str] = []
+    selected_index: Optional[int] = None
+    for iid in tree.get_children():
+        values = tree.item(iid)["values"]
+        if not values:
+            continue
+        symbol_value = str(values[0]).strip().upper()
+        pattern_value = ""
+        if len(values) > 7 and values[7]:
+            pattern_value = str(values[7])
+        display_pattern = pattern_value if pattern_value else "—"
+        display_text = f"{symbol_value} — {display_pattern}"
+        watchlist_symbols.append(symbol_value)
+        current_index = len(watchlist_symbols) - 1
+        watchlist_list.insert("end", display_text)
+        if symbol_value == sym:
+            selected_index = current_index
+
+    if not watchlist_symbols:
+        watchlist_list.insert("end", "Watchlist is empty.")
+        watchlist_list.configure(state=tk.DISABLED)
+    else:
+        watchlist_list.configure(state=tk.NORMAL)
+        if selected_index is not None:
+            watchlist_list.selection_set(selected_index)
+            watchlist_list.see(selected_index)
+
+    def _focus_watchlist_symbol(event=None):
+        selection = watchlist_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(watchlist_symbols):
+            return
+        target_symbol = watchlist_symbols[index]
+        for item in tree.get_children():
+            item_values = tree.item(item)["values"]
+            if item_values and str(item_values[0]).strip().upper() == target_symbol:
+                tree.selection_set(item)
+                tree.focus(item)
+                tree.see(item)
+                break
+
+    watchlist_list.bind("<Double-Button-1>", _focus_watchlist_symbol)
+    watchlist_list.bind("<Return>", _focus_watchlist_symbol)
+
+    tk.Label(
+        watchlist_section,
+        text="Add symbol from screener:",
+        font=("Arial", 9),
+        anchor="w",
+        bg="#ffffff",
+    ).pack(fill="x", padx=4, pady=(0, 2))
+
+    add_row = tk.Frame(watchlist_section, bg="#ffffff")
+    add_row.pack(fill="x", padx=4, pady=(0, 4))
+
+    screener_symbol_var = tk.StringVar()
+
+    screener_entry = tk.Entry(add_row, textvariable=screener_symbol_var)
+    screener_entry.pack(side="left", fill="x", expand=True)
+
+    def _handle_add_from_screener(event=None):
+        ticker = screener_symbol_var.get().strip().upper()
+        if not ticker:
+            messagebox.showerror("Watchlist", "Enter a symbol from your screener.")
+            return "break"
+        if add_symbol_to_watchlist(ticker):
+            screener_symbol_var.set("")
+            load_watchlist()
+
+            def _select_new():
+                for item in tree.get_children():
+                    item_values = tree.item(item)["values"]
+                    if item_values and str(item_values[0]).strip().upper() == ticker:
+                        tree.selection_set(item)
+                        tree.focus(item)
+                        tree.see(item)
+                        break
+
+            root.after(0, _select_new)
+        return "break"
+
+    screener_entry.bind("<Return>", _handle_add_from_screener)
+
+    tk.Button(add_row, text="Add", command=_handle_add_from_screener).pack(side="left", padx=(4, 0))
+
+    tk.Label(
+        info_panel,
         text="Symbol Overview",
         font=("Arial", 12, "bold"),
         anchor="w",
@@ -2783,52 +2994,41 @@ def show_candlestick():
     canvas.get_tk_widget().pack(fill="both", expand=True)
 def load_watchlist():
     tree.delete(*tree.get_children())
-    if not WATCHLIST_PATH.exists():
-        return
     try:
-        with WATCHLIST_PATH.open("r", newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            fieldnames = list(reader.fieldnames or WATCHLIST_HEADER)
-            if "symbol" in fieldnames and "last_close" not in fieldnames:
-                insert_at = fieldnames.index("symbol") + 1
-                fieldnames.insert(insert_at, "last_close")
-            elif "last_close" not in fieldnames:
-                fieldnames.append("last_close")
-
-            price_cache: dict[str, Optional[float]] = {}
-            persisted_rows: list[dict[str, Any]] = []
-            any_updates = False
-
-            for row in reader:
-                if not row:
-                    continue
-
-                working_row: dict[str, Any] = {key: row.get(key, "") for key in fieldnames}
-                updated = _maybe_refresh_watchlist_row(working_row, price_cache)
-                if updated:
-                    any_updates = True
-
-                persisted_rows.append({key: working_row.get(key, "") for key in fieldnames})
-
-                values = []
-                for column in WATCHLIST_COLUMNS:
-                    raw_value = working_row.get(column, "") if working_row else ""
-                    values.append(_format_watchlist_value(column, raw_value, working_row))
-                tree.insert("", "end", values=values)
-
-        if any_updates:
-            try:
-                with WATCHLIST_PATH.open("w", newline="", encoding="utf-8") as handle:
-                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(persisted_rows)
-            except Exception as exc:
-                messagebox.showwarning(
-                    "Watchlist",
-                    f"Updated prices could not be saved to the watchlist:\n{exc}",
-                )
+        fieldnames, rows = _read_watchlist_rows()
     except Exception as exc:
         messagebox.showerror("Watchlist", f"Failed to load watchlist:\n{exc}")
+        return
+
+    price_cache: dict[str, Optional[float]] = {}
+    persisted_rows: list[dict[str, Any]] = []
+    any_updates = False
+
+    for row in rows:
+        working_row: dict[str, Any] = {key: row.get(key, "") for key in fieldnames}
+        updated = _maybe_refresh_watchlist_row(working_row, price_cache)
+        if updated:
+            any_updates = True
+
+        persisted_rows.append({key: working_row.get(key, "") for key in fieldnames})
+
+        values = []
+        for column in WATCHLIST_COLUMNS:
+            raw_value = working_row.get(column, "") if working_row else ""
+            values.append(_format_watchlist_value(column, raw_value, working_row))
+        tree.insert("", "end", values=values)
+
+    if any_updates:
+        try:
+            with WATCHLIST_PATH.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(persisted_rows)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Watchlist",
+                f"Updated prices could not be saved to the watchlist:\n{exc}",
+            )
 
 def refresh_watchlist():
     script_dir = SCRIPT_DIR
