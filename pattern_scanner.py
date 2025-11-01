@@ -12,7 +12,7 @@ from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
@@ -168,6 +168,15 @@ class RiskRewardLevels:
     stop: float
     target: float
     rr_ratio: float
+
+
+@dataclass
+class PatternCandidate:
+    """Normalized representation of a detected chart pattern."""
+
+    name: str
+    confidence: float
+    details: Any = None
 
 # Excluded ETFs
 EXCLUDED_ETFS = ['VTIP', 'NFXS', 'ACWX', 'VXUS', 'NVD', 'NVDD', 'NVDL', 'TBIL', 'VRIG', 'CONL', 'PDBC', 'PFF',
@@ -624,6 +633,236 @@ def detect_double_bottom(
         return False
 
     return max(recent_hits, key=lambda hit: hit.bounce_pct)
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _score_double_bottom_hit(hit: DoubleBottomHit) -> float:
+    score = 0.6
+    bounce = max(float(getattr(hit, "bounce_pct", 0.0)), 0.0)
+    score += _clamp(bounce, 0.0, 0.25)
+    touches = int(getattr(hit, "touch_count", 0) or 0)
+    if touches >= 3:
+        score += 0.08
+    elif touches == 2:
+        score += 0.04
+    if bool(getattr(hit, "breakout", False)):
+        score += 0.07
+    if bool(getattr(hit, "volume_contracted", False)):
+        score += 0.04
+    contraction = getattr(hit, "contraction_pct", None)
+    if isinstance(contraction, (int, float)) and contraction > 0:
+        score += _clamp(contraction, 0.0, 0.08)
+    return _clamp(score, 0.0, 0.99)
+
+
+def _score_cup_handle_hit(hit: CupHandleHit) -> float:
+    score = 0.55
+    depth_pct = max(float(getattr(hit, "cup_depth_pct", 0.0)), 0.0)
+    score += _clamp(depth_pct, 0.0, 0.25)
+    pullback = max(float(getattr(hit, "handle_pullback_pct", 0.0)), 0.0)
+    score += _clamp(0.18 - pullback, 0.0, 0.12)
+    slope = abs(float(getattr(hit, "handle_slope", 0.0)))
+    score += _clamp(0.05 - slope, 0.0, 0.08)
+    return _clamp(score, 0.0, 0.95)
+
+
+def _score_inverse_head_shoulders(pattern: InverseHeadShouldersPattern) -> float:
+    score = 0.58
+    avg_low = max((pattern.left_low + pattern.right_low) / 2 or 0.0, 1e-6)
+    symmetry = 1 - abs(pattern.left_low - pattern.right_low) / avg_low
+    score += _clamp(symmetry, 0.0, 0.12)
+    avg_neckline = max((pattern.neckline_left + pattern.neckline_right) / 2 or 0.0, 1e-6)
+    depth_pct = (avg_neckline - pattern.head_low) / avg_neckline
+    score += _clamp(depth_pct, 0.0, 0.18)
+    neckline_slope = (pattern.neckline_right - pattern.neckline_left) / max(pattern.neckline_left, 1e-6)
+    score += _clamp(neckline_slope, 0.0, 0.08)
+    return _clamp(score, 0.0, 0.9)
+
+
+def _score_ascending_triangle(pattern: AscendingTrianglePattern) -> float:
+    score = 0.55
+    slope_bonus = _clamp(pattern.support_slope, 0.0, 0.1)
+    score += slope_bonus
+    score += _clamp(len(pattern.resistance_indices) * 0.02, 0.0, 0.12)
+    if pattern.breakout:
+        score += 0.08
+    return _clamp(score, 0.0, 0.85)
+
+
+def _score_bullish_pennant(pattern: BullishPennantPattern) -> float:
+    score = 0.5
+    convergence = abs(pattern.upper_slope - pattern.lower_slope)
+    score += _clamp(convergence, 0.0, 0.15)
+    score += _clamp(pattern.length * 0.005, 0.0, 0.1)
+    return _clamp(score, 0.0, 0.82)
+
+
+def _score_bullish_flag(pattern: BullishFlagPattern) -> float:
+    score = 0.5
+    score += _clamp(-pattern.slope, 0.0, 0.15)
+    channel_width = max(pattern.upper_offset - pattern.lower_offset, 0.0)
+    if channel_width > 0:
+        score += _clamp(0.1 / (channel_width + 1e-6), 0.0, 0.08)
+    return _clamp(score, 0.0, 0.8)
+
+
+def _score_bullish_rectangle(pattern: BullishRectanglePattern) -> float:
+    score = 0.48
+    range_pct = (pattern.high - pattern.low) / max(pattern.high, 1e-6)
+    score += _clamp(0.2 - range_pct, 0.0, 0.12)
+    touches = len(pattern.high_touch_indices) + len(pattern.low_touch_indices)
+    score += _clamp(touches * 0.015, 0.0, 0.12)
+    return _clamp(score, 0.0, 0.8)
+
+
+def _score_rounding_bottom(pattern: RoundingBottomPattern) -> float:
+    score = 0.52
+    curvature = float(pattern.coeffs[0]) if pattern.coeffs else 0.0
+    score += _clamp(curvature * 5000, 0.0, 0.12)
+    score += _clamp(pattern.length * 0.003, 0.0, 0.08)
+    return _clamp(score, 0.0, 0.8)
+
+
+def _score_breakaway_gap(pattern: BreakawayGapPattern) -> float:
+    score = 0.6
+    gap_pct = (pattern.curr_open - pattern.prev_close) / max(pattern.prev_close, 1e-6)
+    score += _clamp(gap_pct, 0.0, 0.25)
+    body_pct = (pattern.curr_close - pattern.curr_open) / max(pattern.curr_open, 1e-6)
+    score += _clamp(body_pct, 0.0, 0.1)
+    return _clamp(score, 0.0, 0.9)
+
+
+def _collect_pattern_candidates(df: pd.DataFrame) -> List[PatternCandidate]:
+    candidates: List[PatternCandidate] = []
+
+    double_bottom_hit = detect_double_bottom(df, window=60)
+    if double_bottom_hit:
+        if isinstance(double_bottom_hit, DoubleBottomHit):
+            confidence = _score_double_bottom_hit(double_bottom_hit)
+        else:
+            confidence = 0.6
+        candidates.append(PatternCandidate("Double Bottom", confidence, double_bottom_hit))
+
+    cup_handle_hit = detect_cup_and_handle(df)
+    if cup_handle_hit:
+        confidence = _score_cup_handle_hit(cup_handle_hit)
+        candidates.append(PatternCandidate("Cup and Handle", confidence, cup_handle_hit))
+
+    ihs = detect_inverse_head_shoulders(df)
+    if ihs:
+        confidence = _score_inverse_head_shoulders(ihs)
+        candidates.append(PatternCandidate("Inverse Head and Shoulders", confidence, ihs))
+
+    ascending_triangle = detect_ascending_triangle(df)
+    if ascending_triangle:
+        confidence = _score_ascending_triangle(ascending_triangle)
+        candidates.append(PatternCandidate("Ascending Triangle", confidence, ascending_triangle))
+
+    pennant = detect_bullish_pennant(df)
+    if pennant:
+        confidence = _score_bullish_pennant(pennant)
+        candidates.append(PatternCandidate("Bullish Pennant", confidence, pennant))
+
+    flag = detect_bullish_flag(df)
+    if flag:
+        confidence = _score_bullish_flag(flag)
+        candidates.append(PatternCandidate("Bullish Flag", confidence, flag))
+
+    rectangle = detect_bullish_rectangle(df)
+    if rectangle:
+        confidence = _score_bullish_rectangle(rectangle)
+        candidates.append(PatternCandidate("Bullish Rectangle", confidence, rectangle))
+
+    rounding_bottom = detect_rounding_bottom(df)
+    if rounding_bottom:
+        confidence = _score_rounding_bottom(rounding_bottom)
+        candidates.append(PatternCandidate("Rounding Bottom", confidence, rounding_bottom))
+
+    gap = detect_breakaway_gap(df)
+    if gap:
+        confidence = _score_breakaway_gap(gap)
+        candidates.append(PatternCandidate("Breakaway Gap", confidence, gap))
+
+    candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
+    return candidates
+
+
+def _print_pattern_details(candidate: PatternCandidate) -> None:
+    details = candidate.details
+    if isinstance(details, DoubleBottomHit):
+        print(
+            "  Double Bottom details → "
+            f"Support: {details.support:.2f}, "
+            f"Neckline: {details.neckline:.2f}, "
+            f"Bounce: {details.bounce_pct * 100:.1f}%, "
+            f"Touches: {details.touch_count}, "
+            f"Breakout: {details.breakout}, "
+            f"Volume Contracted: {details.volume_contracted}"
+        )
+    elif isinstance(details, CupHandleHit):
+        print(
+            "  Cup and Handle details → "
+            f"Resistance: {details.resistance:.2f}, "
+            f"Cup Depth: {details.cup_depth:.2f} ({details.cup_depth_pct * 100:.1f}%), "
+            f"Handle Length: {details.handle_length}, "
+            f"Handle Pullback: {details.handle_pullback_pct * 100:.1f}%, "
+            f"Handle Slope: {details.handle_slope:.4f}"
+        )
+    elif isinstance(details, InverseHeadShouldersPattern):
+        print(
+            "  Inverse Head and Shoulders details → "
+            f"L/R Lows: {details.left_low:.2f}/{details.right_low:.2f}, "
+            f"Head Low: {details.head_low:.2f}, "
+            f"Neckline: {details.neckline_left:.2f}→{details.neckline_right:.2f}"
+        )
+    elif isinstance(details, AscendingTrianglePattern):
+        print(
+            "  Ascending Triangle details → "
+            f"Resistance: {details.resistance:.2f}, "
+            f"Support slope: {details.support_slope:.4f}, "
+            f"Touches: {len(details.resistance_indices)}/{len(details.support_indices)}, "
+            f"Breakout: {details.breakout}"
+        )
+    elif isinstance(details, BullishPennantPattern):
+        print(
+            "  Bullish Pennant details → "
+            f"Upper slope: {details.upper_slope:.4f}, "
+            f"Lower slope: {details.lower_slope:.4f}, "
+            f"Length: {details.length}"
+        )
+    elif isinstance(details, BullishFlagPattern):
+        print(
+            "  Bullish Flag details → "
+            f"Slope: {details.slope:.4f}, "
+            f"Upper offset: {details.upper_offset:.2f}, "
+            f"Lower offset: {details.lower_offset:.2f}, "
+            f"Length: {details.length}"
+        )
+    elif isinstance(details, BullishRectanglePattern):
+        print(
+            "  Bullish Rectangle details → "
+            f"Range: {details.low:.2f}-{details.high:.2f}, "
+            f"Touches: {len(details.low_touch_indices)}/{len(details.high_touch_indices)}"
+        )
+    elif isinstance(details, RoundingBottomPattern):
+        print(
+            "  Rounding Bottom details → "
+            f"Curvature: {details.coeffs[0]:.6f}, "
+            f"Length: {details.length}"
+        )
+    elif isinstance(details, BreakawayGapPattern):
+        gap_pct = (details.curr_open - details.prev_close) / max(details.prev_close, 1e-6)
+        body_pct = (details.curr_close - details.curr_open) / max(details.curr_open, 1e-6)
+        print(
+            "  Breakaway Gap details → "
+            f"Prev Close: {details.prev_close:.2f}, "
+            f"Open: {details.curr_open:.2f}, Close: {details.curr_close:.2f}, "
+            f"Gap: {gap_pct * 100:.1f}%, Body: {body_pct * 100:.1f}%"
+        )
+
 
 def _find_argmax(values: Sequence[float]) -> int:
     max_idx = 0
@@ -1222,55 +1461,27 @@ def scan_all_symbols(symbols):
             else:
                 print(" Swing setup did not meet the screener criteria")
 
-            double_bottom_hit = detect_double_bottom(df, window=60)
-            if double_bottom_hit:
-                pattern = "Double Bottom"
-                if isinstance(double_bottom_hit, DoubleBottomHit):
-                    print(
-                        "  Double Bottom details → "
-                        f"Support: {double_bottom_hit.support:.2f}, "
-                        f"Neckline: {double_bottom_hit.neckline:.2f}, "
-                        f"Bounce: {double_bottom_hit.bounce_pct * 100:.1f}%, "
-                        f"Touches: {double_bottom_hit.touch_count}, "
-                        f"Breakout: {double_bottom_hit.breakout}, "
-                        f"Volume Contracted: {double_bottom_hit.volume_contracted}"
-                    )
-            else:
-                pattern = None
-                cup_handle_hit = detect_cup_and_handle(df)
-                if cup_handle_hit:
-                    pattern = "Cup and Handle"
-                    if isinstance(cup_handle_hit, CupHandleHit):
-                        print(
-                            "  Cup and Handle details → "
-                            f"Resistance: {cup_handle_hit.resistance:.2f}, "
-                            f"Cup Depth: {cup_handle_hit.cup_depth:.2f} ({cup_handle_hit.cup_depth_pct * 100:.1f}%), "
-                            f"Handle Length: {cup_handle_hit.handle_length}, "
-                            f"Handle Pullback: {cup_handle_hit.handle_pullback_pct * 100:.1f}%, "
-                            f"Handle Slope: {cup_handle_hit.handle_slope:.4f}"
-                        )
-                else:
-                    ihs = detect_inverse_head_shoulders(df)
-                    if ihs:
-                        pattern = "Inverse Head and Shoulders"
-                    else:
-                        if detect_ascending_triangle(df):
-                            pattern = "Ascending Triangle"
-                        elif detect_bullish_pennant(df):
-                            pattern = "Bullish Pennant"
-                        elif detect_bullish_flag(df):
-                            pattern = "Bullish Flag"
-                        elif detect_bullish_rectangle(df):
-                            pattern = "Bullish Rectangle"
-                        elif detect_rounding_bottom(df):
-                            pattern = "Rounding Bottom"
-                        elif detect_breakaway_gap(df):
-                            pattern = "Breakaway Gap"
+            candidates = _collect_pattern_candidates(df)
+            if not candidates:
+                print(" Skipped: No pattern matched")
+                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
+                continue
 
-                if not pattern:
-                    print(" Skipped: No pattern matched")
-                    disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
-                    continue
+            best_candidate = candidates[0]
+            pattern = best_candidate.name
+            print(
+                " Selected pattern → "
+                f"{pattern} (confidence {best_candidate.confidence:.2f})"
+            )
+            _print_pattern_details(best_candidate)
+
+            if len(candidates) > 1:
+                print("  Alternate pattern signals:")
+                for alternate in candidates[1:3]:
+                    print(
+                        "   • "
+                        f"{alternate.name} (confidence {alternate.confidence:.2f})"
+                    )
 
             rr_levels = calculate_rr_price_action(df, entry)
             if rr_levels is None or rr_levels.rr_ratio > 0.8:
