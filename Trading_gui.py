@@ -54,6 +54,7 @@ from pattern_scanner import (
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
     WATCHLIST_PATH,
+    WATCHLIST_HEADER,
 )
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
@@ -178,6 +179,109 @@ def _format_dollar_amount(value: Optional[float]) -> str:
 
 
 _WATCHLIST_PRICE_COLUMNS = {"last_close", "breakout_high", "target_price", "stop_loss"}
+
+
+_WATCHLIST_REFRESH_CACHE: dict[str, tuple[float, Optional[float]]] = {}
+_WATCHLIST_REFRESH_TTL = 60 * 5
+
+
+def _extract_fast_info_price(fast_info: Any) -> Optional[float]:
+    if fast_info is None:
+        return None
+
+    candidates = (
+        "last_price",
+        "lastPrice",
+        "last",
+        "regular_market_price",
+        "regularMarketPrice",
+        "previous_close",
+        "previousClose",
+    )
+
+    for key in candidates:
+        value = getattr(fast_info, key, None)
+        if value is None and isinstance(fast_info, dict):
+            value = fast_info.get(key)
+        numeric = _coerce_numeric(value)
+        if numeric is not None and numeric > 0:
+            return float(numeric)
+
+    return None
+
+
+def _lookup_latest_close(symbol: str) -> Optional[float]:
+    now = time.time()
+    cached = _WATCHLIST_REFRESH_CACHE.get(symbol)
+    if cached and now - cached[0] < _WATCHLIST_REFRESH_TTL:
+        return cached[1]
+
+    latest_close: Optional[float] = None
+    try:
+        ticker = yf.Ticker(symbol)
+        latest_close = _extract_fast_info_price(getattr(ticker, "fast_info", None))
+
+        if latest_close is None:
+            history = ticker.history(period="5d", interval="1d", auto_adjust=True)
+            history = flatten_yf_columns(history)
+            if isinstance(history, pd.DataFrame) and not history.empty:
+                for column in ("Close", "close", "Adj Close", "adj_close"):
+                    if column in history.columns:
+                        series = history[column].dropna()
+                        if not series.empty:
+                            candidate = _coerce_numeric(series.iloc[-1])
+                            if candidate is not None and candidate > 0:
+                                latest_close = float(candidate)
+                        break
+    except Exception:
+        latest_close = None
+
+    _WATCHLIST_REFRESH_CACHE[symbol] = (now, latest_close)
+    return latest_close
+
+
+def _maybe_refresh_watchlist_row(
+    row: dict[str, Any],
+    price_cache: dict[str, Optional[float]],
+) -> bool:
+    symbol = row.get("symbol")
+    if not symbol:
+        return False
+
+    stored_close = _coerce_numeric(row.get("last_close"))
+
+    if symbol in price_cache:
+        latest_close = price_cache[symbol]
+    else:
+        latest_close = _lookup_latest_close(symbol)
+        price_cache[symbol] = latest_close
+
+    if latest_close is None or not math.isfinite(latest_close) or latest_close <= 0:
+        return False
+
+    updated = False
+    if stored_close is None or not math.isfinite(stored_close) or stored_close <= 0:
+        scale = None
+    else:
+        scale = latest_close / stored_close if stored_close else None
+        if scale is not None and (not math.isfinite(scale) or scale <= 0):
+            scale = None
+
+    if stored_close is None or abs(latest_close - stored_close) >= 0.01:
+        row["last_close"] = f"{latest_close:.2f}"
+        updated = True
+
+    if scale is not None:
+        for key in ("breakout_high", "target_price", "stop_loss"):
+            numeric = _coerce_numeric(row.get(key))
+            if numeric is None:
+                continue
+            adjusted = round(numeric * scale, 2)
+            if abs(adjusted - numeric) >= 0.01:
+                row[key] = f"{adjusted:.2f}"
+                updated = True
+
+    return updated
 
 
 def _format_watchlist_value(column: str, value: Any, row: Optional[dict[str, Any]] = None) -> str:
@@ -2691,12 +2795,45 @@ def load_watchlist():
     try:
         with WATCHLIST_PATH.open("r", newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or WATCHLIST_HEADER)
+            if "symbol" in fieldnames and "last_close" not in fieldnames:
+                insert_at = fieldnames.index("symbol") + 1
+                fieldnames.insert(insert_at, "last_close")
+            elif "last_close" not in fieldnames:
+                fieldnames.append("last_close")
+
+            price_cache: dict[str, Optional[float]] = {}
+            persisted_rows: list[dict[str, Any]] = []
+            any_updates = False
+
             for row in reader:
+                if not row:
+                    continue
+
+                working_row: dict[str, Any] = {key: row.get(key, "") for key in fieldnames}
+                updated = _maybe_refresh_watchlist_row(working_row, price_cache)
+                if updated:
+                    any_updates = True
+
+                persisted_rows.append({key: working_row.get(key, "") for key in fieldnames})
+
                 values = []
                 for column in WATCHLIST_COLUMNS:
-                    raw_value = row.get(column, "") if row else ""
-                    values.append(_format_watchlist_value(column, raw_value, row))
+                    raw_value = working_row.get(column, "") if working_row else ""
+                    values.append(_format_watchlist_value(column, raw_value, working_row))
                 tree.insert("", "end", values=values)
+
+        if any_updates:
+            try:
+                with WATCHLIST_PATH.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(persisted_rows)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "Watchlist",
+                    f"Updated prices could not be saved to the watchlist:\n{exc}",
+                )
     except Exception as exc:
         messagebox.showerror("Watchlist", f"Failed to load watchlist:\n{exc}")
 
