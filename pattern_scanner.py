@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
-from double_bottom_scanner import DoubleBottomHit, scan_double_bottoms
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
 from swing_trading_screener import (
     SwingCandidate,
@@ -299,12 +298,6 @@ def compute_precomputed_indicators(df: pd.DataFrame) -> PrecomputedIndicators:
         volume_slope=volume_slope,
         recent_high_20=recent_high_20,
     )
-
-def hits_to_dataframe(hits: List[DoubleBottomHit]) -> pd.DataFrame:
-    if not hits:
-        return pd.DataFrame()
-    return pd.DataFrame([hit.__dict__ for hit in hits])
-
 
 def _cache_path_for(symbol: str) -> Path:
     normalized = ''.join(ch if ch.isalnum() else '_' for ch in symbol.upper())
@@ -591,72 +584,8 @@ def is_uptrend(df, indicators: Optional[PrecomputedIndicators] = None):
     pass_count = sum([ma50 > ma200, slope > 0, vwap_ok, structure_ok, monthly_ok])
     return pass_count >= 3
 
-def detect_double_bottom(
-    df,
-    window=60,
-    step=1,
-    tolerance=0.03,
-    min_bounce=0.05,
-    require_breakout=True,
-    require_volume_contraction=False,
-):
-    hits = scan_double_bottoms(
-        df,
-        window=window,
-        step=step,
-        tolerance=tolerance,
-        min_bounce=min_bounce,
-        require_breakout=require_breakout,
-        require_volume_contraction=require_volume_contraction,
-    )
-    if not hits:
-        return False
-
-    total_rows = len(df)
-    recent_threshold = max(5, window // 4)
-
-    recent_hits = [
-        hit
-        for hit in hits
-        if getattr(hit, "breakout_idx", None) is not None
-        and total_rows - hit.breakout_idx <= recent_threshold
-    ]
-
-    if not recent_hits:
-        recent_hits = [
-            hit
-            for hit in hits
-            if getattr(hit, "right_idx", None) is not None
-            and total_rows - hit.right_idx <= recent_threshold
-        ]
-
-    if not recent_hits:
-        return False
-
-    return max(recent_hits, key=lambda hit: hit.bounce_pct)
-
-
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
-
-
-def _score_double_bottom_hit(hit: DoubleBottomHit) -> float:
-    score = 0.6
-    bounce = max(float(getattr(hit, "bounce_pct", 0.0)), 0.0)
-    score += _clamp(bounce, 0.0, 0.25)
-    touches = int(getattr(hit, "touch_count", 0) or 0)
-    if touches >= 3:
-        score += 0.08
-    elif touches == 2:
-        score += 0.04
-    if bool(getattr(hit, "breakout", False)):
-        score += 0.07
-    if bool(getattr(hit, "volume_contracted", False)):
-        score += 0.04
-    contraction = getattr(hit, "contraction_pct", None)
-    if isinstance(contraction, (int, float)) and contraction > 0:
-        score += _clamp(contraction, 0.0, 0.08)
-    return _clamp(score, 0.0, 0.99)
 
 
 def _score_cup_handle_hit(hit: CupHandleHit) -> float:
@@ -741,14 +670,6 @@ def _score_breakaway_gap(pattern: BreakawayGapPattern) -> float:
 def _collect_pattern_candidates(df: pd.DataFrame) -> List[PatternCandidate]:
     candidates: List[PatternCandidate] = []
 
-    double_bottom_hit = detect_double_bottom(df, window=60)
-    if double_bottom_hit:
-        if isinstance(double_bottom_hit, DoubleBottomHit):
-            confidence = _score_double_bottom_hit(double_bottom_hit)
-        else:
-            confidence = 0.6
-        candidates.append(PatternCandidate("Double Bottom", confidence, double_bottom_hit))
-
     cup_handle_hit = detect_cup_and_handle(df)
     if cup_handle_hit:
         confidence = _score_cup_handle_hit(cup_handle_hit)
@@ -795,17 +716,7 @@ def _collect_pattern_candidates(df: pd.DataFrame) -> List[PatternCandidate]:
 
 def _print_pattern_details(candidate: PatternCandidate) -> None:
     details = candidate.details
-    if isinstance(details, DoubleBottomHit):
-        print(
-            "  Double Bottom details → "
-            f"Support: {details.support:.2f}, "
-            f"Neckline: {details.neckline:.2f}, "
-            f"Bounce: {details.bounce_pct * 100:.1f}%, "
-            f"Touches: {details.touch_count}, "
-            f"Breakout: {details.breakout}, "
-            f"Volume Contracted: {details.volume_contracted}"
-        )
-    elif isinstance(details, CupHandleHit):
+    if isinstance(details, CupHandleHit):
         print(
             "  Cup and Handle details → "
             f"Resistance: {details.resistance:.2f}, "
