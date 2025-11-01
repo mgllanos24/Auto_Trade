@@ -102,6 +102,7 @@ class InverseHeadShouldersPattern:
     neckline_right_idx: int
     neckline_left: float
     neckline_right: float
+    breakout: bool
 
 
 @dataclass
@@ -679,6 +680,8 @@ def _score_inverse_head_shoulders(pattern: InverseHeadShouldersPattern) -> float
     score += _clamp(depth_pct, 0.0, 0.18)
     neckline_slope = (pattern.neckline_right - pattern.neckline_left) / max(pattern.neckline_left, 1e-6)
     score += _clamp(neckline_slope, 0.0, 0.08)
+    if getattr(pattern, "breakout", False):
+        score += 0.05
     return _clamp(score, 0.0, 0.9)
 
 
@@ -949,8 +952,12 @@ def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
         neckline_left = float(left_high_segment[left_high_rel])
         neckline_right = float(right_high_segment[right_high_rel])
         neckline_level = (neckline_left + neckline_right) / 2
+        close_price = float(closes[-1]) if closes.size else neckline_level
+        high_price = float(highs[-1]) if highs.size else neckline_level
+        breakout = close_price > neckline_level or high_price > neckline_level
+        within_neckline_zone = close_price >= neckline_level * 0.97
 
-        if closes[-1] > neckline_level:
+        if breakout or within_neckline_zone:
             return InverseHeadShouldersPattern(
                 left_idx=offset + l_idx,
                 head_idx=offset + h_idx,
@@ -962,6 +969,7 @@ def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
                 neckline_right_idx=neckline_right_idx,
                 neckline_left=neckline_left,
                 neckline_right=neckline_right,
+                breakout=breakout,
             )
 
     return None
