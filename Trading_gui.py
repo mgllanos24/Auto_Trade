@@ -2920,16 +2920,27 @@ def show_candlestick():
                 ihs = _load_persisted_pattern(sym, pattern_name, InverseHeadShouldersPattern)
             if isinstance(ihs, InverseHeadShouldersPattern):
                 try:
-                    indices = [ihs.left_idx, ihs.head_idx, ihs.right_idx]
-                    lows = [ihs.left_low, ihs.head_low, ihs.right_low]
-                    valid = [idx for idx in indices if 0 <= idx < len(plot_df)]
-                    if len(valid) == 3:
-                        dates = [plot_df['Date'].iloc[idx] for idx in indices]
+                    structure_points: list[tuple[int, float, float]] = []
+                    for idx, fallback_low in (
+                        (ihs.left_idx, ihs.left_low),
+                        (ihs.head_idx, ihs.head_low),
+                        (ihs.right_idx, ihs.right_low),
+                    ):
+                        if 0 <= idx < len(plot_df):
+                            date_value = float(plot_df['Date'].iloc[idx])
+                            candle_low = float(analysis_df['low'].iloc[idx])
+                            if not np.isfinite(candle_low):
+                                candle_low = float(fallback_low)
+                            structure_points.append((idx, date_value, candle_low))
+
+                    if len(structure_points) == 3:
+                        structure_points.sort(key=lambda point: point[0])
+                        dates = [point[1] for point in structure_points]
+                        lows = [point[2] for point in structure_points]
                         ax_price.scatter(dates, lows, color='#d62728', s=50, label='Shoulders/Head', zorder=6)
-                        sorted_points = sorted(zip(indices, lows), key=lambda point: point[0])
                         ax_price.plot(
-                            [plot_df['Date'].iloc[idx] for idx, _ in sorted_points],
-                            [price for _, price in sorted_points],
+                            dates,
+                            lows,
                             color='#1f77b4',
                             linewidth=1.4,
                             label='Structure',
@@ -2938,10 +2949,18 @@ def show_candlestick():
 
                     if 0 <= ihs.neckline_left_idx < len(plot_df) and 0 <= ihs.neckline_right_idx < len(plot_df):
                         neck_dates = [
-                            plot_df['Date'].iloc[ihs.neckline_left_idx],
-                            plot_df['Date'].iloc[ihs.neckline_right_idx],
+                            float(plot_df['Date'].iloc[ihs.neckline_left_idx]),
+                            float(plot_df['Date'].iloc[ihs.neckline_right_idx]),
                         ]
-                        neck_prices = [ihs.neckline_left, ihs.neckline_right]
+                        neck_prices = []
+                        for idx, fallback_price in (
+                            (ihs.neckline_left_idx, ihs.neckline_left),
+                            (ihs.neckline_right_idx, ihs.neckline_right),
+                        ):
+                            price_val = float(analysis_df['high'].iloc[idx])
+                            if not np.isfinite(price_val):
+                                price_val = float(fallback_price)
+                            neck_prices.append(price_val)
                         ax_price.plot(neck_dates, neck_prices, color='#9467bd', linestyle='--', linewidth=1.5, label='Neckline')
                         overlay_added = True
 
