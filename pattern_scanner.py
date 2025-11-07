@@ -8,7 +8,7 @@ import csv
 import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from scipy.signal import find_peaks, argrelextrema
 from sklearn.linear_model import LinearRegression
@@ -585,8 +585,15 @@ def _normalise_external_data(symbol: str, rows: Sequence[Dict[str, Any]]) -> Opt
     try:
         df = pd.DataFrame(rows)
     except Exception as exc:
-        print(f" Failed to build DataFrame for {symbol} fallback data: {exc}")
-        return None
+        # ``tests._pandas_stub`` mimics a subset of pandas and expects mapping
+        # inputs instead of a sequence of dictionaries.  Attempt to coerce the
+        # payload into the required structure before giving up.
+        try:
+            mapping = {key: [row.get(key) for row in rows] for key in rows[0]}
+            df = pd.DataFrame(mapping)
+        except Exception:
+            print(f" Failed to build DataFrame for {symbol} fallback data: {exc}")
+            return None
 
     if df.empty:
         return None
@@ -595,8 +602,22 @@ def _normalise_external_data(symbol: str, rows: Sequence[Dict[str, Any]]) -> Opt
         print(f" Missing Date column in fallback data for {symbol}")
         return None
 
-    df['Date'] = pd.to_datetime(df['Date'], utc=True, errors='coerce')
-    df = df.dropna(subset=['Date'])
+    try:
+        df['Date'] = pd.to_datetime(df['Date'], utc=True, errors='coerce')
+    except TypeError:
+        df['Date'] = pd.to_datetime(df['Date'], utc=True)
+    if hasattr(df, 'dropna'):
+        df = df.dropna(subset=['Date'])
+    else:
+        date_values = list(df['Date'])
+        valid_indices = [idx for idx, value in enumerate(date_values) if value is not None]
+        if not valid_indices:
+            return None
+        filtered = {
+            column: [list(df[column])[idx] for idx in valid_indices]
+            for column in df.columns
+        }
+        df = pd.DataFrame(filtered)
 
     required = ['open', 'high', 'low', 'close', 'volume']
     missing = [column for column in required if column not in df.columns]
@@ -606,15 +627,177 @@ def _normalise_external_data(symbol: str, rows: Sequence[Dict[str, Any]]) -> Opt
 
     numeric_columns = required + (["adj_close"] if 'adj_close' in df.columns else [])
     for column in numeric_columns:
-        df[column] = pd.to_numeric(df[column], errors='coerce')
+        try:
+            converter = getattr(pd, 'to_numeric')
+        except AttributeError:
+            converter = None
 
-    df = df.dropna(subset=required)
+        if converter is not None:
+            try:
+                df[column] = converter(df[column], errors='coerce')
+                continue
+            except TypeError:
+                pass
+
+        values = []
+        for value in df[column]:
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                values.append(None)
+        df[column] = values
+
+    if hasattr(df, 'dropna'):
+        df = df.dropna(subset=required)
+    else:
+        masks = []
+        for column in required:
+            masks.append([value is not None for value in df[column]])
+        combined = [all(values) for values in zip(*masks)] if masks else []
+        valid_indices = [idx for idx, flag in enumerate(combined) if flag]
+        if not valid_indices:
+            return None
+        filtered = {
+            column: [list(df[column])[idx] for idx in valid_indices]
+            for column in df.columns
+        }
+        df = pd.DataFrame(filtered)
     if df.empty:
         return None
 
     df.set_index('Date', inplace=True)
     df.sort_index(inplace=True)
     return df[numeric_columns]
+
+
+def _serialise_date(value: Union[str, datetime, date, None]) -> Optional[str]:
+    """Return an ISO formatted date string for API parameters.
+
+    The Tiingo API accepts both date strings and :class:`datetime` objects.  The
+    helper keeps the public ``get_tiingo_data`` interface flexible while keeping
+    the request construction logic readable.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
+def get_tiingo_data(
+    symbol: str,
+    token: Optional[str] = None,
+    *,
+    start_date: Union[str, datetime, date, None] = None,
+    end_date: Union[str, datetime, date, None] = None,
+    session: Optional[requests.Session] = None,
+) -> pd.DataFrame:
+    """Return OHLCV data for *symbol* from the Tiingo REST API.
+
+    Parameters
+    ----------
+    symbol:
+        The market ticker to request, e.g. ``"AAPL"``.
+    token:
+        Optional Tiingo API token.  When omitted the function falls back to the
+        ``TIINGO_API_KEY`` environment variable.
+    start_date / end_date:
+        Optional date filters.  They accept either strings in ``YYYY-mm-dd``
+        format or :class:`datetime.date` / :class:`datetime.datetime` instances.
+        When left unset Tiingo will return the most recent candles (roughly 1
+        year of data by default).
+    session:
+        Optional :class:`requests.Session` instance used to execute the HTTP
+        request.  Supplying a session simplifies unit testing and allows callers
+        to reuse HTTP connections.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Historical OHLCV candles indexed by timestamp.
+
+    Raises
+    ------
+    ValueError
+        If the ticker symbol is missing or no API token is available.
+    requests.RequestException
+        If Tiingo responds with an HTTP error status.
+    RuntimeError
+        If Tiingo returns malformed JSON data.
+    """
+
+    if not symbol or not str(symbol).strip():
+        raise ValueError("symbol must be a non-empty string")
+
+    token = token or TIINGO_API_KEY
+    if not token:
+        raise ValueError("A Tiingo API token must be provided")
+
+    url = f"https://api.tiingo.com/tiingo/daily/{symbol.lower()}/prices"
+
+    params: Dict[str, Any] = {
+        "resampleFreq": "daily",
+    }
+
+    start = _serialise_date(start_date)
+    if start:
+        params["startDate"] = start
+
+    end = _serialise_date(end_date)
+    if end:
+        params["endDate"] = end
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Token {token}",
+    }
+
+    client = session or requests
+
+    response = client.get(url, params=params, headers=headers, timeout=30)
+    try:
+        response.raise_for_status()
+    except requests.RequestException:
+        # Re-raise the original exception to preserve the error details.
+        raise
+
+    try:
+        payload = response.json()
+    except ValueError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError("Tiingo response did not contain valid JSON") from exc
+
+    if not isinstance(payload, Sequence):
+        raise RuntimeError("Tiingo response payload must be a list")
+
+    rows = []
+    for entry in payload:
+        if not isinstance(entry, dict):  # pragma: no cover - defensive guard
+            continue
+        date_value = entry.get("date")
+        if not date_value:
+            continue
+        rows.append(
+            {
+                "Date": date_value,
+                "open": entry.get("open"),
+                "high": entry.get("high"),
+                "low": entry.get("low"),
+                "close": entry.get("close"),
+                "adj_close": entry.get("adjClose"),
+                "volume": entry.get("volume"),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("Tiingo response did not contain price data")
+
+    df = _normalise_external_data(symbol, rows)
+    if df is None:  # pragma: no cover - defensive guard
+        raise RuntimeError("Tiingo data could not be normalised")
+    return df
 
 
 def _fetch_tiingo_data(symbol: str) -> Optional[pd.DataFrame]:
