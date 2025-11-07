@@ -74,7 +74,6 @@ WATCHLIST_HEADER = [
     'rr_ratio',
     'stop_loss',
     'target_price',
-    'timestamp',
     'direction',
     'pattern',
     '3mo_volume'
@@ -1483,20 +1482,34 @@ def calculate_rr_price_action(df, entry_price) -> Optional[RiskRewardLevels]:
         rr_ratio=rr,
     )
 
-def _normalise_watchlist_row(row: list[str]) -> list[str]:
+def _normalise_watchlist_row(row: list[str], header: Optional[Sequence[str]] = None) -> list[str]:
     """Pad or trim a CSV row so it matches ``WATCHLIST_HEADER``."""
 
-    if len(row) < len(WATCHLIST_HEADER):
-        # Insert an empty placeholder for the newly added ``last_close`` column
-        # right after the symbol.  This keeps backwards compatibility with
-        # watchlists written before the column existed.
-        row = list(row)
-        row.insert(1, "")
+    values = list(row)
+    header_list = list(header or [])
 
-    if len(row) > len(WATCHLIST_HEADER):
-        row = row[: len(WATCHLIST_HEADER)]
+    if header_list:
+        while "timestamp" in header_list:
+            idx = header_list.index("timestamp")
+            del header_list[idx]
+            if idx < len(values):
+                del values[idx]
+    elif len(values) == len(WATCHLIST_HEADER) + 1:
+        # Legacy rows may still include a timestamp column even without a
+        # header.  The timestamp used to sit between ``target_price`` and
+        # ``direction``.
+        del values[6]
 
-    return row
+    if len(values) < len(WATCHLIST_HEADER):
+        # Insert an empty placeholder for the ``last_close`` column right after
+        # the symbol.  This keeps backwards compatibility with watchlists
+        # written before that column existed.
+        values.insert(1, "")
+
+    if len(values) > len(WATCHLIST_HEADER):
+        values = values[: len(WATCHLIST_HEADER)]
+
+    return values
 
 
 def log_watchlist(
@@ -1536,7 +1549,6 @@ def log_watchlist(
         rr_levels.rr_ratio if rr_levels else None,
         stop_value,
         target_value,
-        datetime.now().strftime('%m-%d %H:%M'),
         'bullish',
         pattern,
         volume_3mo
@@ -1550,7 +1562,7 @@ def log_watchlist(
             for row in reader:
                 if not row:
                     continue
-                normalised = _normalise_watchlist_row(row)
+                normalised = _normalise_watchlist_row(row, header)
                 existing[normalised[0]] = normalised
     else:
         existing = {}
