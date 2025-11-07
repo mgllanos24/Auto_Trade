@@ -96,7 +96,6 @@ WATCHLIST_COLUMNS = [
     "target_price",
     "stop_loss",
     "rr_ratio",
-    "timestamp",
     "pattern",
     "direction",
 ]
@@ -473,7 +472,7 @@ def _format_watchlist_value(column: str, value: Any, row: Optional[dict[str, Any
 def _normalise_watchlist_fieldnames(fieldnames: Sequence[str] | None) -> list[str]:
     """Return a normalised list of watchlist fieldnames."""
 
-    normalised = list(fieldnames or [])
+    normalised = [field for field in (fieldnames or []) if field != "timestamp"]
 
     if "symbol" in normalised and "last_close" not in normalised:
         insert_at = normalised.index("symbol") + 1
@@ -606,8 +605,6 @@ def add_symbol_to_watchlist(symbol: str, *, source_label: str = "Screener Candid
 
     if "direction" in fieldnames and not entry.get("direction"):
         entry["direction"] = "bullish"
-
-    entry["timestamp"] = datetime.now().strftime("%m-%d %H:%M")
 
     price_cache: dict[str, Optional[float]] = {}
     _maybe_refresh_watchlist_row(entry, price_cache)
