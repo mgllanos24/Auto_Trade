@@ -2,6 +2,7 @@ import alpaca_trade_api as tradeapi
 import pandas as pd
 import json
 import yfinance as yf
+import requests
 import os
 import csv
 import time
@@ -54,6 +55,9 @@ DATA_DIR = _resolve_data_dir()
 CACHE_DIR = DATA_DIR / "yf_cache"
 CACHE_TTL = timedelta(minutes=30)
 PATTERN_DETAILS_DIR = DATA_DIR / "pattern_details"
+
+ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")
+TIINGO_API_KEY = os.environ.get("TIINGO_API_KEY")
 
 
 _PD_TIMESTAMP = getattr(pd, "Timestamp", None)
@@ -574,6 +578,184 @@ def _apply_split_adjustments(df: pd.DataFrame) -> None:
                 df[column][idx] = df[column][idx] * factor
 
 
+def _normalise_external_data(symbol: str, rows: Sequence[Dict[str, Any]]) -> Optional[pd.DataFrame]:
+    if not rows:
+        return None
+
+    try:
+        df = pd.DataFrame(rows)
+    except Exception as exc:
+        print(f" Failed to build DataFrame for {symbol} fallback data: {exc}")
+        return None
+
+    if df.empty:
+        return None
+
+    if 'Date' not in df.columns:
+        print(f" Missing Date column in fallback data for {symbol}")
+        return None
+
+    df['Date'] = pd.to_datetime(df['Date'], utc=True, errors='coerce')
+    df = df.dropna(subset=['Date'])
+
+    required = ['open', 'high', 'low', 'close', 'volume']
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        print(f" Missing columns in fallback data for {symbol}: {missing}")
+        return None
+
+    numeric_columns = required + (["adj_close"] if 'adj_close' in df.columns else [])
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors='coerce')
+
+    df = df.dropna(subset=required)
+    if df.empty:
+        return None
+
+    df.set_index('Date', inplace=True)
+    df.sort_index(inplace=True)
+    return df[numeric_columns]
+
+
+def _fetch_tiingo_data(symbol: str) -> Optional[pd.DataFrame]:
+    token = TIINGO_API_KEY
+    if not token:
+        return None
+
+    url = f"https://api.tiingo.com/tiingo/daily/{symbol.lower()}/prices"
+    start_date = (datetime.utcnow() - timedelta(days=400)).strftime("%Y-%m-%d")
+    params = {
+        "startDate": start_date,
+        "resampleFreq": "daily",
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Token {token}",
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+    except Exception as exc:
+        print(f" Tiingo request failed for {symbol}: {exc}")
+        return None
+
+    if response.status_code != 200:
+        print(f" Tiingo returned status {response.status_code} for {symbol}: {response.text[:120]}")
+        return None
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        print(f" Failed to parse Tiingo response for {symbol}: {exc}")
+        return None
+
+    if not isinstance(payload, list):
+        print(f" Unexpected Tiingo payload for {symbol}")
+        return None
+
+    rows = []
+    for entry in payload:
+        date = entry.get('date')
+        if not date:
+            continue
+        rows.append(
+            {
+                'Date': date,
+                'open': entry.get('open'),
+                'high': entry.get('high'),
+                'low': entry.get('low'),
+                'close': entry.get('close'),
+                'adj_close': entry.get('adjClose'),
+                'volume': entry.get('volume'),
+            }
+        )
+
+    df = _normalise_external_data(symbol, rows)
+    if df is not None:
+        print(f" Using Tiingo fallback data for {symbol}")
+    return df
+
+
+def _fetch_alpha_vantage_data(symbol: str) -> Optional[pd.DataFrame]:
+    key = ALPHAVANTAGE_API_KEY
+    if not key:
+        return None
+
+    params = {
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "symbol": symbol,
+        "apikey": key,
+        "outputsize": "full",
+    }
+
+    try:
+        response = requests.get("https://www.alphavantage.co/query", params=params, timeout=30)
+    except Exception as exc:
+        print(f" Alpha Vantage request failed for {symbol}: {exc}")
+        return None
+
+    if response.status_code != 200:
+        print(f" Alpha Vantage returned status {response.status_code} for {symbol}: {response.text[:120]}")
+        return None
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        print(f" Failed to parse Alpha Vantage response for {symbol}: {exc}")
+        return None
+
+    time_series = payload.get("Time Series (Daily)")
+    if not isinstance(time_series, dict):
+        message = payload.get("Note") or payload.get("Error Message") or "Unexpected Alpha Vantage payload"
+        print(f" Alpha Vantage payload issue for {symbol}: {message}")
+        return None
+
+    rows = []
+    for date_str, values in time_series.items():
+        rows.append(
+            {
+                'Date': date_str,
+                'open': values.get('1. open'),
+                'high': values.get('2. high'),
+                'low': values.get('3. low'),
+                'close': values.get('4. close'),
+                'adj_close': values.get('5. adjusted close'),
+                'volume': values.get('6. volume'),
+            }
+        )
+
+    df = _normalise_external_data(symbol, rows)
+    if df is not None:
+        print(f" Using Alpha Vantage fallback data for {symbol}")
+    return df
+
+
+def _try_fallback_sources(symbol: str) -> Optional[pd.DataFrame]:
+    for provider in (_fetch_tiingo_data, _fetch_alpha_vantage_data):
+        try:
+            df = provider(symbol)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f" Fallback provider {provider.__name__} raised for {symbol}: {exc}")
+            continue
+        if df is not None and not df.empty:
+            return df
+    return None
+
+
+def _recover_with_fallback(symbol: str) -> Optional[pd.DataFrame]:
+    fallback = _try_fallback_sources(symbol)
+    if fallback is not None and not fallback.empty:
+        _store_cached_data(symbol, fallback)
+        return fallback
+
+    cached = _load_cached_data(symbol, ignore_ttl=True)
+    if cached is not None:
+        print(f" Using cached data for {symbol}")
+        return cached
+
+    return None
+
+
 def get_yf_data(symbol):
     cached = _load_cached_data(symbol)
     if cached is not None:
@@ -589,14 +771,14 @@ def get_yf_data(symbol):
         )
     except Exception as exc:
         print(f" Error downloading {symbol}: {exc}")
-        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
         return pd.DataFrame()
 
     if raw is None or raw.empty:
         print(f" No data returned for {symbol}")
-        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
         return pd.DataFrame()
@@ -605,7 +787,7 @@ def get_yf_data(symbol):
 
     if df.empty or len(df) < 90:
         print(f" Insufficient data for {symbol}: only {len(df)} rows")
-        fallback = _load_cached_data(symbol, ignore_ttl=True)
+        fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
         return pd.DataFrame()
