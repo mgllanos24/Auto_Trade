@@ -3,9 +3,16 @@ import pandas as pd
 from cup_handle_scanner import CupHandleHit, detect_cup_and_handle
 
 
-def _make_close_series(values):
+def _make_close_series(values, *, volumes=None, rsi=None):
     index = pd.date_range("2024-01-01", periods=len(values), freq="D")
-    return pd.DataFrame({"close": values}, index=index)
+    data = {"close": values}
+    if volumes is None:
+        volumes = list(reversed(range(1500, 1500 + len(values))))
+    if rsi is None:
+        rsi = [50.0] * len(values)
+    data["volume"] = volumes
+    data["rsi"] = rsi
+    return pd.DataFrame(data, index=index)
 
 
 def test_detect_cup_and_handle_returns_hit_with_metrics():
@@ -15,7 +22,9 @@ def test_detect_cup_and_handle_returns_hit_with_metrics():
     handle = [99.0, 98.8, 98.6, 98.4, 98.2]
     closes = cup + handle
 
-    df = _make_close_series(closes)
+    volumes = [2500 - i * 10 for i in range(len(closes))]
+    rsi = [50.0] * len(closes)
+    df = _make_close_series(closes, volumes=volumes, rsi=rsi)
 
     hit = detect_cup_and_handle(df, cup_window=len(cup), handle_window=len(handle))
 
@@ -37,8 +46,55 @@ def test_detect_cup_and_handle_rejects_shallow_cup():
     shallow_cup = [100, 99.5, 99, 98.5, 98, 98.5, 99, 99.5]
     handle = [99.4, 99.2, 99.1]
     closes = shallow_cup + handle
-    df = _make_close_series(closes)
+    volumes = [2500 - i * 5 for i in range(len(closes))]
+    rsi = [50.0] * len(closes)
+    df = _make_close_series(closes, volumes=volumes, rsi=rsi)
 
     hit = detect_cup_and_handle(df, cup_window=len(shallow_cup), handle_window=len(handle))
+
+    assert hit is None
+
+
+def test_detect_cup_and_handle_rejects_wide_handle():
+    cup_left = [100, 98, 96, 94, 92]
+    cup_right = [92, 94, 96, 98, 100]
+    cup = cup_left + cup_right
+    handle = [85, 86, 87]
+    closes = cup + handle
+    volumes = [2200 - i * 5 for i in range(len(closes))]
+    rsi = [50.0] * len(closes)
+    df = _make_close_series(closes, volumes=volumes, rsi=rsi)
+
+    hit = detect_cup_and_handle(df, cup_window=len(cup), handle_window=len(handle))
+
+    assert hit is None
+
+
+def test_detect_cup_and_handle_rejects_rising_handle_volume():
+    cup_left = [100, 98, 96, 94, 92]
+    cup_right = [92, 94, 96, 98, 100]
+    cup = cup_left + cup_right
+    handle = [99.0, 98.8, 98.6]
+    closes = cup + handle
+    volumes = [2000 + i * 10 for i in range(len(closes))]
+    rsi = [50.0] * len(closes)
+    df = _make_close_series(closes, volumes=volumes, rsi=rsi)
+
+    hit = detect_cup_and_handle(df, cup_window=len(cup), handle_window=len(handle))
+
+    assert hit is None
+
+
+def test_detect_cup_and_handle_rejects_non_neutral_rsi():
+    cup_left = [100, 98, 96, 94, 92]
+    cup_right = [92, 94, 96, 98, 100]
+    cup = cup_left + cup_right
+    handle = [99.5, 99.6, 99.8]
+    closes = cup + handle
+    volumes = [2400 - i * 5 for i in range(len(closes))]
+    rsi = [70.0] * len(cup) + [65.0, 66.0, 67.0]
+    df = _make_close_series(closes, volumes=volumes, rsi=rsi)
+
+    hit = detect_cup_and_handle(df, cup_window=len(cup), handle_window=len(handle))
 
     assert hit is None

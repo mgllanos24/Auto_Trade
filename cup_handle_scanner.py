@@ -55,6 +55,7 @@ def detect_cup_and_handle(
     min_cup_depth_pct: float | None = None,
     max_handle_pullback_pct: float | None = None,
     handle_slope_bounds: tuple[float, float] | None = None,
+    handle_consolidation_pct: float = 0.1,
 ) -> Optional[CupHandleHit]:
     """Return a :class:`CupHandleHit` if a pattern is detected.
 
@@ -125,6 +126,40 @@ def detect_cup_and_handle(
     handle_pullback = (resistance - handle_min) / resistance
     if handle_pullback < 0 or handle_pullback > max_handle_pullback_pct:
         return None
+
+    if handle_consolidation_pct <= 0 or handle_consolidation_pct >= 1:
+        handle_consolidation_pct = 0.1
+
+    if handle_min < resistance * (1 - handle_consolidation_pct):
+        return None
+
+    handle_max = float(handle.max())
+    if handle_max > resistance * (1 + tolerance):
+        return None
+
+    volumes = df["volume"] if "volume" in getattr(df, "columns", []) else None
+    if volumes is not None:
+        handle_volume = volumes.tail(window).iloc[cup_window:]
+        if len(handle_volume) == handle_window and not handle_volume.isnull().any():
+            cup_volume = volumes.tail(window).iloc[:cup_window]
+            ref_volume = cup_volume.iloc[-len(handle_volume) :] if len(cup_volume) else cup_volume
+            if ref_volume is not None and len(ref_volume):
+                ref_mean = float(np.mean(ref_volume))
+                handle_mean = float(np.mean(handle_volume))
+                if ref_mean > 0 and handle_mean >= ref_mean:
+                    return None
+            volume_slope = float(_linear_regression_slope(range(len(handle_volume)), handle_volume))
+            if volume_slope > 0:
+                return None
+
+    rsi_series = df["rsi"] if "rsi" in getattr(df, "columns", []) else None
+    if rsi_series is not None:
+        handle_rsi = rsi_series.tail(window).iloc[cup_window:]
+        if len(handle_rsi) == handle_window and not handle_rsi.isnull().any():
+            rsi_min = float(handle_rsi.min())
+            rsi_max = float(handle_rsi.max())
+            if rsi_min < 40 or rsi_max > 60:
+                return None
 
     def _series_index(series: pd.Series, mode: str) -> Optional[object]:
         if series is None or getattr(series, "empty", True):
