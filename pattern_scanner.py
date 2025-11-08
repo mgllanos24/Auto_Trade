@@ -1354,18 +1354,82 @@ def _shoulder_has_width(
     return similar_candles >= 2
 
 
+def _has_prior_downtrend(
+    closes: Sequence[float],
+    pivot_idx: int,
+    min_drop: float = 0.03,
+    lookback: int = 15,
+) -> bool:
+    """Return ``True`` when prices were trending lower into the pattern."""
+
+    if pivot_idx <= 1:
+        return False
+
+    start = max(0, pivot_idx - lookback)
+    segment = closes[start : pivot_idx + 1]
+    if len(segment) < 4:
+        return False
+
+    start_price = float(segment[0])
+    end_price = float(segment[-1])
+    if start_price <= 0:
+        return False
+
+    drop = (start_price - end_price) / start_price
+    if drop < min_drop:
+        return False
+
+    return end_price < start_price
+
+
+def _has_meaningful_bounce(low: float, high: float, min_bounce: float = 0.01) -> bool:
+    if low <= 0:
+        return False
+    return (high - low) / low >= min_bounce
+
+
+def _neckline_is_consistent(left: float, right: float, tolerance: float = 0.05) -> bool:
+    level = (left + right) / 2 if (left or right) else 0.0
+    if level == 0:
+        return False
+    return abs(left - right) / level <= tolerance
+
+
+def _fallback_troughs(lows: Sequence[float], distance: int = 3) -> List[int]:
+    """Simple local minima finder used when SciPy peaks are unavailable."""
+
+    troughs: List[int] = []
+    for idx in range(1, len(lows) - 1):
+        curr = lows[idx]
+        if curr >= lows[idx - 1] or curr > lows[idx + 1]:
+            continue
+
+        if troughs and idx - troughs[-1] < distance:
+            prev_idx = troughs[-1]
+            if curr < lows[prev_idx]:
+                troughs[-1] = idx
+            continue
+
+        troughs.append(idx)
+
+    return troughs
+
+
 def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
     recent = df.tail(60)
     lows = recent['low'].values
     highs = recent['high'].values
     closes = recent['close'].values
 
-    troughs, _ = find_peaks(-lows, distance=5, prominence=0.5)
+    troughs, _ = find_peaks(-lows, distance=3, prominence=0.5)
+    if len(troughs) < 3:
+        fallback = _fallback_troughs(lows, distance=3)
+        if len(fallback) >= 3:
+            troughs = fallback
     if len(troughs) < 3:
         return None
 
     offset = len(df) - len(recent)
-
     recency_window = 10
 
     for i in range(len(troughs) - 2, -1, -1):
@@ -1386,28 +1450,50 @@ def detect_inverse_head_shoulders(df) -> Optional[InverseHeadShouldersPattern]:
             continue
         if max(l, r) == 0:
             continue
-        if abs(l - r) / max(l, r) > 0.1:
+        if abs(l - r) / max(l, r) > 0.05:
             continue
         if not (_shoulder_has_width(lows, l_idx) and _shoulder_has_width(lows, r_idx)):
             continue
+        if (min(l, r) - h) / min(l, r) < 0.02:
+            continue
+        if h_idx - l_idx < 3 or r_idx - h_idx < 3:
+            continue
+        if not _has_prior_downtrend(closes, l_idx):
+            continue
 
-        left_high_segment = highs[l_idx:h_idx + 1]
-        right_high_segment = highs[h_idx:r_idx + 1]
+        left_high_segment = highs[l_idx : h_idx + 1]
+        right_high_segment = highs[h_idx : r_idx + 1]
         if len(left_high_segment) == 0 or len(right_high_segment) == 0:
             continue
 
         left_high_rel = _find_argmax(left_high_segment)
         right_high_rel = _find_argmax(right_high_segment)
 
+        if left_high_rel == 0 or left_high_rel == len(left_high_segment) - 1:
+            continue
+        if right_high_rel == 0 or right_high_rel == len(right_high_segment) - 1:
+            continue
+
+        left_high_value = float(left_high_segment[left_high_rel])
+        right_high_value = float(right_high_segment[right_high_rel])
+        if not _has_meaningful_bounce(l, left_high_value):
+            continue
+        if not _has_meaningful_bounce(r, right_high_value):
+            continue
+
         neckline_left_idx = offset + l_idx + left_high_rel
         neckline_right_idx = offset + h_idx + right_high_rel
-        neckline_left = float(left_high_segment[left_high_rel])
-        neckline_right = float(right_high_segment[right_high_rel])
+        neckline_left = left_high_value
+        neckline_right = right_high_value
+
+        if not _neckline_is_consistent(neckline_left, neckline_right):
+            continue
+
         neckline_level = (neckline_left + neckline_right) / 2
         close_price = float(closes[-1]) if closes.size else neckline_level
         high_price = float(highs[-1]) if highs.size else neckline_level
         breakout = close_price > neckline_level or high_price > neckline_level
-        within_neckline_zone = close_price >= neckline_level * 0.97
+        within_neckline_zone = close_price >= neckline_level * 0.99
 
         if breakout or within_neckline_zone:
             return InverseHeadShouldersPattern(
