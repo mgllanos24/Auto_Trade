@@ -168,6 +168,7 @@ from pattern_scanner import (
     RiskRewardLevels,
     calculate_rr_price_action,
     detect_ascending_triangle,
+    detect_inverse_head_shoulders,
 )
 
 
@@ -209,6 +210,140 @@ def _build_price_frame(highs, lows, closes):
 
 def _extend_price_frame(highs, lows, closes, extra_highs, extra_lows, extra_closes):
     return _build_price_frame(highs + extra_highs, lows + extra_lows, closes + extra_closes)
+
+
+def _build_inverse_head_shoulders_frame():
+    highs = [
+        56.5,
+        55.7,
+        55.0,
+        54.2,
+        53.5,
+        52.8,
+        52.0,
+        51.2,
+        50.8,
+        50.4,
+        50.0,
+        49.7,
+        49.4,
+        50.2,
+        49.8,
+        49.4,
+        50.0,
+        50.6,
+        50.2,
+        50.5,
+        51.0,
+        51.8,
+        52.6,
+        53.5,
+        54.6,
+        55.8,
+    ]
+    lows = [
+        55.8,
+        55.0,
+        54.2,
+        53.4,
+        52.6,
+        51.8,
+        51.0,
+        50.2,
+        49.8,
+        49.4,
+        48.9,
+        48.2,
+        48.0,
+        48.8,
+        47.6,
+        47.0,
+        47.8,
+        48.6,
+        48.1,
+        48.3,
+        48.8,
+        49.6,
+        50.4,
+        51.5,
+        52.8,
+        54.0,
+    ]
+    closes = [
+        56.0,
+        55.2,
+        54.4,
+        53.6,
+        52.9,
+        52.0,
+        51.2,
+        50.6,
+        50.0,
+        49.8,
+        49.2,
+        48.8,
+        48.4,
+        49.2,
+        48.2,
+        47.6,
+        48.4,
+        49.2,
+        48.7,
+        49.0,
+        49.6,
+        50.4,
+        51.6,
+        52.6,
+        53.8,
+        55.0,
+    ]
+    return _build_price_frame(highs, lows, closes)
+
+
+def _build_v_bottom_frame():
+    highs = [
+        60.0,
+        59.2,
+        58.5,
+        57.0,
+        55.5,
+        54.0,
+        53.0,
+        53.5,
+        54.5,
+        55.5,
+        56.5,
+        57.5,
+    ]
+    lows = [
+        59.2,
+        58.4,
+        57.0,
+        55.2,
+        53.0,
+        50.5,
+        48.0,
+        49.5,
+        51.0,
+        53.0,
+        54.5,
+        55.5,
+    ]
+    closes = [
+        59.5,
+        58.6,
+        57.5,
+        55.8,
+        53.8,
+        51.2,
+        49.0,
+        50.2,
+        52.0,
+        54.0,
+        55.2,
+        56.2,
+    ]
+    return _build_price_frame(highs, lows, closes)
 
 
 def test_detect_ascending_triangle_prefers_flat_resistance():
@@ -345,6 +480,28 @@ def test_detect_bullish_rectangle_rejects_trending_channel():
 
     window = len(channel_highs)
     pattern = pattern_scanner.detect_bullish_rectangle(df, window=window, tolerance=0.02, min_touches=4)
+
+    assert pattern is None
+
+
+def test_detect_inverse_head_shoulders_validates_pattern_structure():
+    df = _build_inverse_head_shoulders_frame()
+
+    pattern = detect_inverse_head_shoulders(df)
+
+    assert pattern is not None
+    assert pattern.left_low > pattern.head_low
+    assert pattern.right_low > pattern.head_low
+    neckline_avg = (pattern.neckline_left + pattern.neckline_right) / 2
+    assert neckline_avg > 0
+    assert abs(pattern.neckline_left - pattern.neckline_right) / neckline_avg < 0.05
+    assert pattern.breakout is True
+
+
+def test_detect_inverse_head_shoulders_rejects_single_v_bottom():
+    df = _build_v_bottom_frame()
+
+    pattern = detect_inverse_head_shoulders(df)
 
     assert pattern is None
 
