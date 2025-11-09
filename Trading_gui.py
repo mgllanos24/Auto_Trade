@@ -16,7 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import math
 import pandas as pd
 import yfinance as yf
@@ -57,6 +57,7 @@ from pattern_scanner import (
     WATCHLIST_PATH,
     WATCHLIST_HEADER,
 )
+from ai_reversal_screener import screen_symbols
 
 API_KEY = 'PKWMYLAWJCU6ITACV6KP'
 API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
@@ -574,7 +575,14 @@ def add_symbol_to_my_watchlist(symbol: str, *, label: str = "") -> bool:
     return True
 
 
-def add_symbol_to_watchlist(symbol: str, *, source_label: str = "Screener Candidate") -> bool:
+def add_symbol_to_watchlist(
+    symbol: str,
+    *,
+    source_label: str = "Screener Candidate",
+    pattern: Optional[str] = None,
+    direction: Optional[str] = None,
+    extra_fields: Optional[dict[str, Any]] = None,
+) -> bool:
     """Persist a manually provided symbol to the shared watchlist."""
 
     normalized = (symbol or "").strip().upper()
@@ -600,11 +608,22 @@ def add_symbol_to_watchlist(symbol: str, *, source_label: str = "Screener Candid
         entry = {key: "" for key in fieldnames}
 
     entry["symbol"] = normalized
-    if source_label and not entry.get("pattern"):
-        entry["pattern"] = source_label
 
-    if "direction" in fieldnames and not entry.get("direction"):
-        entry["direction"] = "bullish"
+    if pattern and pattern.strip():
+        entry["pattern"] = pattern.strip()
+    elif source_label and source_label.strip() and not entry.get("pattern"):
+        entry["pattern"] = source_label.strip()
+
+    if "direction" in fieldnames:
+        if direction:
+            entry["direction"] = direction.strip().lower()
+        elif not entry.get("direction"):
+            entry["direction"] = "bullish"
+
+    if extra_fields:
+        for key, value in extra_fields.items():
+            if key in fieldnames:
+                entry[key] = value
 
     price_cache: dict[str, Optional[float]] = {}
     _maybe_refresh_watchlist_row(entry, price_cache)
@@ -2072,6 +2091,10 @@ scan_status_var = None
 scan_button = None
 is_scanning = False
 
+reversal_status_var = None
+reversal_button = None
+is_reversal_scanning = False
+
 
 def run_scan():
     global is_scanning
@@ -2105,6 +2128,116 @@ def run_scan():
             if status == "Completed":
                 load_watchlist()
             is_scanning = False
+
+        root.after(0, finalize)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def run_reversal_screener():
+    global is_reversal_scanning
+
+    if is_reversal_scanning or reversal_status_var is None or reversal_button is None:
+        return
+
+    prompt = simpledialog.askstring(
+        "AI Reversal Screener",
+        "Enter comma-separated ticker symbols to scan:",
+        parent=root,
+    )
+
+    if prompt is None:
+        return
+
+    symbols = [part.strip().upper() for part in prompt.replace("\n", ",").split(",") if part.strip()]
+    if not symbols:
+        messagebox.showerror("AI Reversal Screener", "Please provide at least one ticker symbol.")
+        return
+
+    reversal_status_var.set("Running…")
+    reversal_button.config(state="disabled")
+    is_reversal_scanning = True
+
+    def worker():
+        try:
+            results = screen_symbols(symbols, start="2015-01-01", end=None, inter_syms=["SPY", "DXY", "^VIX"], from_csv=None)
+        except Exception as exc:
+            outcome: tuple[str, Any] = ("error", exc)
+        else:
+            outcome = ("ok", results)
+
+        def finalize():
+            global is_reversal_scanning
+
+            status_text = "Completed"
+            try:
+                if outcome[0] == "error":
+                    status_text = "Error"
+                    messagebox.showerror("AI Reversal Screener", f"Failed to run screener:\n{outcome[1]}")
+                    return
+
+                df = outcome[1]
+                if df.empty:
+                    status_text = "No Candidates"
+                    messagebox.showinfo(
+                        "AI Reversal Screener",
+                        "The screener did not identify any reversal candidates for the provided symbols.",
+                    )
+                    return
+
+                added_symbols: list[str] = []
+                summary_lines: list[str] = []
+
+                for _, row in df.iterrows():
+                    symbol_value = str(row.get("symbol", "")).strip().upper()
+                    if not symbol_value:
+                        continue
+
+                    slope_raw = row.get("slope_5")
+                    try:
+                        slope_value = float(slope_raw)
+                    except (TypeError, ValueError):
+                        slope_value = 0.0
+
+                    direction_value = "bullish" if slope_value < 0 else "bearish"
+                    pattern_label = "reversal long" if direction_value == "bullish" else "reversal short"
+
+                    probability_raw = row.get("prob_reversal_1_3d")
+                    probability_value: Optional[float]
+                    try:
+                        probability_value = float(probability_raw) if probability_raw is not None else None
+                    except (TypeError, ValueError):
+                        probability_value = None
+
+                    extras: dict[str, Any] = {}
+                    if probability_value is not None and not math.isnan(probability_value):
+                        extras["rr_ratio"] = round(probability_value, 4)
+
+                    added = add_symbol_to_watchlist(
+                        symbol_value,
+                        source_label=pattern_label,
+                        pattern=pattern_label,
+                        direction=direction_value,
+                        extra_fields=extras or None,
+                    )
+                    if added:
+                        added_symbols.append(symbol_value)
+                        if probability_value is not None and not math.isnan(probability_value):
+                            summary_lines.append(f"{symbol_value}: P(reversal)={probability_value:.1%}")
+                        else:
+                            summary_lines.append(symbol_value)
+
+                if added_symbols:
+                    load_watchlist()
+                    message = "Added to watchlist:\n" + "\n".join(summary_lines)
+                else:
+                    message = "No new symbols were added to the watchlist."
+
+                messagebox.showinfo("AI Reversal Screener", message)
+            finally:
+                reversal_status_var.set(status_text)
+                reversal_button.config(state="normal")
+                is_reversal_scanning = False
 
         root.after(0, finalize)
 
@@ -3339,7 +3472,7 @@ def sort_treeview(tree, col, descending=False):
 
 def setup_layout():
     global tree, chart_frame, symbol_var, qty_var, entry_var, sl_var, total_value_var, order_tree
-    global scan_status_var, scan_button
+    global scan_status_var, scan_button, reversal_status_var, reversal_button
 
     last_edited = {"field": None}
 
@@ -3389,6 +3522,12 @@ def setup_layout():
     scan_button = tk.Button(top, text="Pattern Scanner", command=run_scan)
     scan_button.pack(side="left")
     tk.Label(top, textvariable=scan_status_var).pack(side="left", padx=10)
+
+    reversal_status_var = tk.StringVar(value="Idle")
+    reversal_button = tk.Button(top, text="AI Reversal Screener", command=run_reversal_screener)
+    reversal_button.pack(side="left")
+    tk.Label(top, textvariable=reversal_status_var).pack(side="left", padx=10)
+
     tk.Button(top, text="Reload Watchlist", command=refresh_watchlist).pack(side="right", padx=5)
 
     tree_frame = tk.Frame(root); tree_frame.pack(fill="x", padx=10)
