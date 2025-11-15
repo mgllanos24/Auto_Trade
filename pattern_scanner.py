@@ -57,6 +57,31 @@ CACHE_DIR = DATA_DIR / "yf_cache"
 CACHE_TTL = timedelta(minutes=30)
 PATTERN_DETAILS_DIR = DATA_DIR / "pattern_details"
 
+_MASTER_CSV_PATH_ENV = os.environ.get("AUTO_TRADE_MASTER_CSV")
+MASTER_CSV_PATH = (
+    Path(_MASTER_CSV_PATH_ENV).expanduser() if _MASTER_CSV_PATH_ENV else None
+)
+
+try:
+    MASTER_CSV_LOOKBACK_DAYS = int(
+        os.environ.get("AUTO_TRADE_MASTER_LOOKBACK_DAYS", "0")
+    )
+except ValueError:
+    MASTER_CSV_LOOKBACK_DAYS = 0
+
+_MASTER_CSV_REQUIRED_COLUMNS = (
+    "symbol",
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+)
+_MASTER_CSV_OPTIONAL_COLUMNS = ("adj_close",)
+_MASTER_CSV_CACHE: Optional[pd.DataFrame] = None
+_MASTER_CSV_FAILED = False
+
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")
 TIINGO_API_KEY = os.environ.get("TIINGO_API_KEY")
 
@@ -942,6 +967,144 @@ def _recover_with_fallback(symbol: str) -> Optional[pd.DataFrame]:
     return None
 
 
+def _load_master_csv_table() -> Optional[pd.DataFrame]:
+    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED
+
+    if MASTER_CSV_PATH is None:
+        return None
+
+    if _MASTER_CSV_FAILED:
+        return None
+
+    if _MASTER_CSV_CACHE is not None:
+        return _MASTER_CSV_CACHE
+
+    if not hasattr(pd, "read_csv"):
+        print(" Pandas does not provide read_csv(); master CSV disabled")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    path = MASTER_CSV_PATH
+
+    try:
+        table = pd.read_csv(path)
+    except FileNotFoundError:
+        print(f" Master CSV configured but not found at {path}")
+        _MASTER_CSV_FAILED = True
+        return None
+    except Exception as exc:
+        print(f" Failed to read master CSV {path}: {exc}")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    if table is None:
+        _MASTER_CSV_FAILED = True
+        print(f" Master CSV at {path} did not return a DataFrame")
+        return None
+
+    if not hasattr(table, "rename") or not hasattr(table, "dropna"):
+        print(" Master CSV could not be processed (missing DataFrame helpers)")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    column_map = {str(col).strip().lower(): col for col in getattr(table, "columns", [])}
+    missing = [col for col in _MASTER_CSV_REQUIRED_COLUMNS if col not in column_map]
+    if missing:
+        print(f" Master CSV is missing required columns: {missing}")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    rename_map = {column_map[name]: name for name in _MASTER_CSV_REQUIRED_COLUMNS}
+    for optional in _MASTER_CSV_OPTIONAL_COLUMNS:
+        original = column_map.get(optional)
+        if original:
+            rename_map[original] = optional
+
+    table = table.rename(columns=rename_map)
+
+    if not hasattr(pd, "to_datetime"):
+        print(" Pandas does not provide to_datetime(); master CSV disabled")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    table = table.dropna(subset=["symbol", "date"])
+    table["symbol"] = table["symbol"].astype(str)
+    if hasattr(table["symbol"], "str"):
+        table["symbol"] = table["symbol"].str.upper()
+    else:  # pragma: no cover - defensive fallback
+        table["symbol"] = [str(value).upper() for value in table["symbol"]]
+
+    table["date"] = pd.to_datetime(table["date"], errors="coerce", utc=True)
+    table = table.dropna(subset=["date"])
+
+    if not hasattr(pd, "to_numeric"):
+        print(" Pandas does not provide to_numeric(); master CSV disabled")
+        _MASTER_CSV_FAILED = True
+        return None
+
+    numeric_cols = ["open", "high", "low", "close", "volume"]
+    for column in numeric_cols:
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+
+    optional_cols = [col for col in _MASTER_CSV_OPTIONAL_COLUMNS if col in table.columns]
+    for column in optional_cols:
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+
+    table = table.dropna(subset=numeric_cols)
+    table = table.sort_values(["symbol", "date"])
+
+    _MASTER_CSV_CACHE = table
+    return _MASTER_CSV_CACHE
+
+
+def _load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
+    table = _load_master_csv_table()
+    if table is None or table.empty:
+        return None
+
+    target = symbol.upper()
+    try:
+        symbol_rows = table[table["symbol"] == target]
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    if symbol_rows is None or symbol_rows.empty:
+        return None
+
+    symbol_rows = symbol_rows.copy()
+
+    if MASTER_CSV_LOOKBACK_DAYS > 0 and "date" in symbol_rows.columns:
+        latest = symbol_rows["date"].max()
+        if pd.isna(latest):
+            return None
+        cutoff = latest - timedelta(days=max(MASTER_CSV_LOOKBACK_DAYS, 0))
+        symbol_rows = symbol_rows[symbol_rows["date"] >= cutoff]
+        if symbol_rows.empty:
+            return None
+
+    if "adj_close" in symbol_rows.columns:
+        _apply_split_adjustments(symbol_rows)
+
+    try:
+        symbol_rows = symbol_rows.set_index("date")
+    except KeyError:
+        return None
+
+    if hasattr(symbol_rows, "sort_index"):
+        symbol_rows = symbol_rows.sort_index()
+
+    cleaned = symbol_rows[["open", "high", "low", "close", "volume"]].dropna()
+
+    if cleaned.empty or len(cleaned) < 90:
+        print(
+            f" Master CSV for {target} has insufficient rows: {len(cleaned)}"
+        )
+        return None
+
+    _store_cached_data(target, cleaned)
+    return cleaned
+
+
 def get_yf_data(symbol):
     cached = _load_cached_data(symbol)
     if cached is not None:
@@ -1040,9 +1203,24 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
     if not symbols:
         return results
 
+    symbols_to_download: List[str] = []
+
+    if MASTER_CSV_PATH is not None:
+        for symbol in symbols:
+            csv_df = _load_symbol_from_master_csv(symbol)
+            if csv_df is not None and not csv_df.empty:
+                results[symbol] = csv_df
+            else:
+                symbols_to_download.append(symbol)
+    else:
+        symbols_to_download = list(symbols)
+
+    if not symbols_to_download:
+        return results
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_symbol = {
-            executor.submit(get_yf_data, symbol): symbol for symbol in symbols
+            executor.submit(get_yf_data, symbol): symbol for symbol in symbols_to_download
         }
         for future in as_completed(future_to_symbol):
             symbol = future_to_symbol[future]
