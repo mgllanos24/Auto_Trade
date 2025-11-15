@@ -59,6 +59,27 @@ You can obtain such data from a brokerage API, CSV exports, or any other
 market data provider. Make sure all price values are floats and the
 index is sorted in ascending chronological order.
 
+### Using a shared CSV for multiple tickers
+
+If you maintain one consolidated CSV that stores OHLCV history for many
+symbols, point the pattern scanner at the file via the
+`AUTO_TRADE_MASTER_CSV` environment variable. The loader expects the CSV
+to contain at least the following columns:
+
+- `symbol`
+- `date`
+- `open`
+- `high`
+- `low`
+- `close`
+- `volume`
+
+When present, an `adj_close` column is used to adjust past OHLC values
+for splits. You can optionally limit the amount of history pulled from
+the file by setting `AUTO_TRADE_MASTER_LOOKBACK_DAYS` to a positive
+integer. Rows newer than that many days relative to the latest entry per
+symbol are passed into the scanners; older data is ignored.
+
 ## Working with the screener
 
 1. Configure the screener parameters (optional). The defaults from

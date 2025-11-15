@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import types
+from unittest import mock
 
 
 def _install_stub_modules() -> None:
@@ -536,3 +537,65 @@ def test_calculate_rr_price_action_uses_recent_swing_high(monkeypatch):
     assert rr_levels.target == expected_target
     expected_rr = round((entry_price - lows[7]) / (expected_target - entry_price), 2)
     assert rr_levels.rr_ratio == expected_rr
+
+
+def test_fetch_symbol_data_prefers_master_csv():
+    class DummyFrame:
+        def __init__(self):
+            self.empty = False
+
+    sentinel = DummyFrame()
+
+    def fake_loader(symbol):
+        if symbol == "AAPL":
+            return sentinel
+        return None
+
+    with mock.patch.object(
+        pattern_scanner, "_load_symbol_from_master_csv", side_effect=fake_loader
+    ) as loader:
+        with mock.patch.object(
+            pattern_scanner, "get_yf_data", side_effect=lambda sym: f"yf:{sym}"
+        ) as yf_mock:
+            original_path = pattern_scanner.MASTER_CSV_PATH
+            original_cache = pattern_scanner._MASTER_CSV_CACHE
+            original_failed = pattern_scanner._MASTER_CSV_FAILED
+            try:
+                pattern_scanner.MASTER_CSV_PATH = Path("dummy.csv")
+                pattern_scanner._MASTER_CSV_CACHE = None
+                pattern_scanner._MASTER_CSV_FAILED = False
+
+                results = pattern_scanner.fetch_symbol_data(["AAPL", "MSFT"])
+            finally:
+                pattern_scanner.MASTER_CSV_PATH = original_path
+                pattern_scanner._MASTER_CSV_CACHE = original_cache
+                pattern_scanner._MASTER_CSV_FAILED = original_failed
+
+    assert results["AAPL"] is sentinel
+    assert results["MSFT"] == "yf:MSFT"
+    loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
+    assert yf_mock.call_args_list == [mock.call("MSFT")]
+
+
+def test_fetch_symbol_data_uses_yfinance_when_master_missing():
+    with mock.patch.object(pattern_scanner, "_load_symbol_from_master_csv", return_value=None) as loader:
+        with mock.patch.object(
+            pattern_scanner, "get_yf_data", side_effect=lambda sym: f"yf:{sym}"
+        ) as yf_mock:
+            original_path = pattern_scanner.MASTER_CSV_PATH
+            original_cache = pattern_scanner._MASTER_CSV_CACHE
+            original_failed = pattern_scanner._MASTER_CSV_FAILED
+            try:
+                pattern_scanner.MASTER_CSV_PATH = Path("dummy.csv")
+                pattern_scanner._MASTER_CSV_CACHE = None
+                pattern_scanner._MASTER_CSV_FAILED = False
+
+                results = pattern_scanner.fetch_symbol_data(["AAPL", "MSFT"])
+            finally:
+                pattern_scanner.MASTER_CSV_PATH = original_path
+                pattern_scanner._MASTER_CSV_CACHE = original_cache
+                pattern_scanner._MASTER_CSV_FAILED = original_failed
+
+    assert results == {"AAPL": "yf:AAPL", "MSFT": "yf:MSFT"}
+    loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
+    assert yf_mock.call_args_list == [mock.call("AAPL"), mock.call("MSFT")]
