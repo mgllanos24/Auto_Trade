@@ -467,6 +467,83 @@ def flatten_yf_columns(df):
     return df
 
 
+def _normalise_yf_response(symbol: str, raw: pd.DataFrame) -> Optional[pd.DataFrame]:
+    if raw is None or raw.empty:
+        print(f" No data returned for {symbol}")
+        return None
+
+    df = flatten_yf_columns(raw)
+
+    if df.empty or len(df) < 90:
+        print(f" Insufficient data for {symbol}: only {len(df)} rows")
+        return None
+
+    df = df.reset_index()
+
+    date_column = None
+    for candidate in ('Date', 'date', 'Datetime', 'datetime', df.columns[0]):
+        if candidate in df.columns:
+            date_column = candidate
+            break
+
+    if date_column is None:
+        print(f" Missing date column for {symbol}")
+        return None
+
+    df.rename(
+        columns={
+            date_column: 'Date',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Adj Close': 'adj_close',
+            'Volume': 'volume',
+        },
+        inplace=True,
+    )
+
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', utc=True)
+    df = df.dropna(subset=['Date'])
+
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    optional_numeric = []
+    if 'adj_close' in df.columns:
+        optional_numeric.append('adj_close')
+    missing_columns = [column for column in numeric_cols if column not in df.columns]
+    if missing_columns:
+        print(f" Missing columns for {symbol}: {missing_columns}")
+        return None
+
+    for column in [*numeric_cols, *optional_numeric]:
+        df[column] = pd.to_numeric(df[column], errors='coerce')
+
+    if 'adj_close' in df.columns:
+        _apply_split_adjustments(df)
+
+    df = df.dropna(subset=numeric_cols)
+
+    if df.empty:
+        print(f" Filtered out all rows for {symbol} due to NaNs")
+        return None
+
+    df.set_index('Date', inplace=True)
+    df.sort_index(inplace=True)
+
+    return df[numeric_cols]
+
+
+def _download_with_yf_history(symbol: str) -> Optional[pd.DataFrame]:
+    try:
+        ticker = yf.Ticker(symbol)
+        history = ticker.history(period='1y', interval='1d', auto_adjust=False)
+    except Exception as exc:
+        print(f" Secondary yfinance history failed for {symbol}: {exc}")
+        return None
+
+    return _normalise_yf_response(symbol, history)
+
+
 def compute_precomputed_indicators(df: pd.DataFrame) -> PrecomputedIndicators:
     entry = float(df['close'].iloc[-1]) if not df.empty else float('nan')
 
@@ -1114,80 +1191,28 @@ def get_yf_data(symbol):
         )
     except Exception as exc:
         print(f" Error downloading {symbol}: {exc}")
+        fallback = _download_with_yf_history(symbol)
+        if fallback is not None:
+            _store_cached_data(symbol, fallback)
+            return fallback
+
         fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
         return pd.DataFrame()
 
-    if raw is None or raw.empty:
-        print(f" No data returned for {symbol}")
+    cleaned = _normalise_yf_response(symbol, raw)
+    if cleaned is None:
+        fallback = _download_with_yf_history(symbol)
+        if fallback is not None:
+            _store_cached_data(symbol, fallback)
+            return fallback
+
         fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
         return pd.DataFrame()
 
-    df = flatten_yf_columns(raw)
-
-    if df.empty or len(df) < 90:
-        print(f" Insufficient data for {symbol}: only {len(df)} rows")
-        fallback = _recover_with_fallback(symbol)
-        if fallback is not None:
-            return fallback
-        return pd.DataFrame()
-
-    df = df.reset_index()
-
-    date_column = None
-    for candidate in ('Date', 'date', 'Datetime', 'datetime', df.columns[0]):
-        if candidate in df.columns:
-            date_column = candidate
-            break
-
-    if date_column is None:
-        print(f" Missing date column for {symbol}")
-        return pd.DataFrame()
-
-    df.rename(
-        columns={
-            date_column: 'Date',
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Close': 'close',
-            'Adj Close': 'adj_close',
-            'Volume': 'volume',
-        },
-        inplace=True,
-    )
-
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', utc=True)
-    df = df.dropna(subset=['Date'])
-
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-    optional_numeric = []
-    if 'adj_close' in df.columns:
-        optional_numeric.append('adj_close')
-    missing_columns = [column for column in numeric_cols if column not in df.columns]
-    if missing_columns:
-        print(f" Missing columns for {symbol}: {missing_columns}")
-        return pd.DataFrame()
-
-    for column in [*numeric_cols, *optional_numeric]:
-        df[column] = pd.to_numeric(df[column], errors='coerce')
-
-    if 'adj_close' in df.columns:
-        _apply_split_adjustments(df)
-
-    df = df.dropna(subset=numeric_cols)
-
-    if df.empty:
-        print(f" Filtered out all rows for {symbol} due to NaNs")
-        return pd.DataFrame()
-
-    df.set_index('Date', inplace=True)
-    df.sort_index(inplace=True)
-
-    cleaned = df[numeric_cols]
     _store_cached_data(symbol, cleaned)
     return cleaned
 
