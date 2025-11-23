@@ -21,19 +21,21 @@ resulting trade ideas and manual trade log in a friendly dashboard.
 
    ```bash
    pip install -U pip
-   pip install pandas numpy
+   pip install -r requirements.txt
    ```
 
-   The utilities themselves rely on `pandas`, while the broader test
-   suite also uses `numpy`.
+   The core scanners rely on `pandas` and `numpy`, while the GUI and
+   optional data fetchers require the additional dependencies listed in
+   `requirements.txt` (`alpaca_trade_api`, `yfinance`, `requests`,
+   `scipy`, `scikit-learn`, `matplotlib`, `mplfinance`, `pytest`).
 
 ## Configuring Alpaca credentials
 
-The optional desktop GUI in [`live_trading_gui.py`](live_trading_gui.py) reads
-your Alpaca API credentials from environment variables.  For convenience it
-also loads a local `.env` file from the project root if present.  Create the
-file with the following contents (replace the placeholders with your own
-credentials):
+Both desktop GUI entry points ([`live_trading_gui.py`](live_trading_gui.py)
+and [`Trading_gui.py`](Trading_gui.py)) read your Alpaca API credentials from
+environment variables.  For convenience they also load a local `.env` file
+from the project root if present.  Create the file with the following contents
+(replace the placeholders with your own credentials):
 
 ```text
 ALPACA_API_KEY=your_api_key
