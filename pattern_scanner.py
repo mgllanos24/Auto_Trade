@@ -1,4 +1,3 @@
-import alpaca_trade_api as tradeapi
 import pandas as pd
 import json
 import yfinance as yf
@@ -24,11 +23,6 @@ from swing_trading_screener import (
     evaluate_swing_setup,
 )
 from ai_reversal_screener import screen_symbols as run_reversal_screen
-
-API_KEY = 'PKWMYLAWJCU6ITACV6KP'
-API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
-BASE_URL = 'https://paper-api.alpaca.markets'
-api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 

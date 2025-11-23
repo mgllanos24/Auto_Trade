@@ -57,9 +57,11 @@ from pattern_scanner import (
     WATCHLIST_PATH,
     WATCHLIST_HEADER,
 )
+from live_trading_gui import _load_env_file, _read_env
 
-API_KEY = 'PKWMYLAWJCU6ITACV6KP'
-API_SECRET = 'k8T9M3XdpVcNQudgPudCfqtkRJ0IUCChFSsKYe07'
+_load_env_file()
+API_KEY = _read_env("ALPACA_API_KEY")
+API_SECRET = _read_env("ALPACA_API_SECRET")
 paper_api = tradeapi.REST(API_KEY, API_SECRET, 'https://paper-api.alpaca.markets', api_version='v2')
 live_api = tradeapi.REST(API_KEY, API_SECRET, 'https://api.alpaca.markets', api_version='v2')
 
