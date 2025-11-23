@@ -46,15 +46,20 @@ def _resolve_data_dir() -> Path:
     return Path.home() / ".auto_trade"
 
 
+def _resolve_master_csv_path(data_dir: Path) -> Path:
+    env_path = os.environ.get("AUTO_TRADE_MASTER_CSV")
+    if env_path:
+        return Path(env_path).expanduser()
+    return data_dir / "us_liquid_stocks_ohlcv_last2y.csv"
+
+
 DATA_DIR = _resolve_data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = DATA_DIR / "yf_cache"
 CACHE_TTL = timedelta(minutes=30)
 PATTERN_DETAILS_DIR = DATA_DIR / "pattern_details"
 
-_MASTER_CSV_PATH_ENV = os.environ.get("AUTO_TRADE_MASTER_CSV")
-MASTER_CSV_PATH = (
-    Path(_MASTER_CSV_PATH_ENV).expanduser() if _MASTER_CSV_PATH_ENV else None
-)
+MASTER_CSV_PATH = _resolve_master_csv_path(DATA_DIR)
 
 try:
     MASTER_CSV_LOOKBACK_DAYS = int(
@@ -1174,6 +1179,134 @@ def _load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
 
     _store_cached_data(target, cleaned)
     return cleaned
+
+
+def load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
+    """Public wrapper used by external consumers such as the GUI."""
+
+    return _load_symbol_from_master_csv(symbol)
+
+
+def _prepare_master_csv_rows(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    working = df.copy()
+    if "Date" in working.columns:
+        date_series = working["Date"]
+    elif "date" in working.columns:
+        date_series = working["date"]
+    else:
+        date_series = working.index
+
+    date_values = pd.to_datetime(date_series, errors="coerce", utc=True)
+    if hasattr(working, "set_index"):
+        working = working.copy()
+
+    required_columns = ["open", "high", "low", "close", "volume"]
+    if not set(required_columns).issubset(working.columns):
+        return pd.DataFrame()
+
+    payload = {
+        "symbol": str(symbol).upper(),
+        "date": date_values,
+        "open": working["open"],
+        "high": working["high"],
+        "low": working["low"],
+        "close": working["close"],
+        "volume": working["volume"],
+    }
+
+    if "adj_close" in working.columns:
+        payload["adj_close"] = working["adj_close"]
+
+    rows = pd.DataFrame(payload)
+    rows = rows.dropna(subset=["date", "open", "high", "low", "close", "volume"])
+    return rows
+
+
+def update_master_csv(data_by_symbol: Dict[str, pd.DataFrame]) -> Optional[Path]:
+    """Append the latest OHLCV data into the shared master CSV file."""
+
+    if not data_by_symbol:
+        return MASTER_CSV_PATH
+
+    target_path = MASTER_CSV_PATH
+    frames: List[pd.DataFrame] = []
+    for symbol, df in data_by_symbol.items():
+        prepared = _prepare_master_csv_rows(symbol, df)
+        if not prepared.empty:
+            frames.append(prepared)
+
+    if not frames:
+        return target_path
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f" Failed to create master CSV directory {target_path.parent}: {exc}")
+        return None
+
+    try:
+        new_rows = pd.concat(frames, ignore_index=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f" Failed to combine master CSV rows: {exc}")
+        return None
+
+    try:
+        if target_path.exists():
+            existing = pd.read_csv(target_path)
+        else:
+            existing = pd.DataFrame(columns=[*_MASTER_CSV_REQUIRED_COLUMNS, *_MASTER_CSV_OPTIONAL_COLUMNS])
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f" Failed to read existing master CSV {target_path}: {exc}")
+        existing = pd.DataFrame(columns=[*_MASTER_CSV_REQUIRED_COLUMNS, *_MASTER_CSV_OPTIONAL_COLUMNS])
+
+    optional_cols = [col for col in _MASTER_CSV_OPTIONAL_COLUMNS if col in new_rows.columns or col in existing.columns]
+    all_columns = [*_MASTER_CSV_REQUIRED_COLUMNS, *optional_cols]
+    missing_in_existing = [col for col in all_columns if col not in existing.columns]
+    for column in missing_in_existing:
+        existing[column] = np.nan
+    missing_in_new = [col for col in all_columns if col not in new_rows.columns]
+    for column in missing_in_new:
+        new_rows[column] = np.nan
+
+    populated_optional = [
+        col
+        for col in optional_cols
+        if (col in new_rows and new_rows[col].notna().any())
+        or (col in existing and existing[col].notna().any())
+    ]
+    all_columns = [*_MASTER_CSV_REQUIRED_COLUMNS, *populated_optional]
+    new_rows = new_rows[all_columns]
+    existing = existing.reindex(columns=all_columns)
+    try:
+        new_rows["date"] = pd.to_datetime(new_rows["date"], errors="coerce", utc=True)
+        existing["date"] = pd.to_datetime(existing["date"], errors="coerce", utc=True)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    if existing.empty:
+        combined = new_rows.copy()
+    else:
+        combined = pd.concat([existing[all_columns], new_rows], ignore_index=True)
+    combined = combined.dropna(subset=["symbol", "date"])
+    try:
+        combined = combined.drop_duplicates(subset=["symbol", "date"], keep="last")
+        combined = combined.sort_values(["symbol", "date"])
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    try:
+        combined.to_csv(target_path, index=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f" Failed to write master CSV {target_path}: {exc}")
+        return None
+
+    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED
+    _MASTER_CSV_CACHE = None
+    _MASTER_CSV_FAILED = False
+    return target_path
 
 
 def get_yf_data(symbol):
@@ -2298,6 +2431,7 @@ def scan_all_symbols(symbols):
 
     symbols_to_fetch = [s for s in symbols if s.upper() not in EXCLUDED_ETFS]
     data_by_symbol = fetch_symbol_data(symbols_to_fetch)
+    update_master_csv(data_by_symbol)
     reversal_results = _scan_trend_reversal(symbols_to_fetch)
 
     for symbol in symbols:
