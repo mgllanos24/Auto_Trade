@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 import types
 from unittest import mock
@@ -549,24 +550,31 @@ def test_calculate_rr_price_action_uses_recent_swing_high(monkeypatch):
     assert rr_levels.rr_ratio == expected_rr
 
 
-def test_fetch_symbol_data_prefers_master_csv():
-    class DummyFrame:
-        def __init__(self):
-            self.empty = False
+def test_fetch_symbol_data_prefers_master_csv(monkeypatch):
+    import pandas as pd
 
-    sentinel = DummyFrame()
+    base_df = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1_000_000],
+        },
+        index=pd.to_datetime(["2024-01-03"], utc=True),
+    )
 
     def fake_loader(symbol):
         if symbol == "AAPL":
-            return sentinel
+            return base_df
         return None
+
+    monkeypatch.setattr(pattern_scanner, "_latest_trading_day", lambda today=None: date(2024, 1, 3))
 
     with mock.patch.object(
         pattern_scanner, "_load_symbol_from_master_csv", side_effect=fake_loader
     ) as loader:
-        with mock.patch.object(
-            pattern_scanner, "get_yf_data", side_effect=lambda sym: f"yf:{sym}"
-        ) as yf_mock:
+        with mock.patch.object(pattern_scanner, "_download_symbol_updates") as yf_mock:
             original_path = pattern_scanner.MASTER_CSV_PATH
             original_cache = pattern_scanner._MASTER_CSV_CACHE
             original_failed = pattern_scanner._MASTER_CSV_FAILED
@@ -581,34 +589,36 @@ def test_fetch_symbol_data_prefers_master_csv():
                 pattern_scanner._MASTER_CSV_CACHE = original_cache
                 pattern_scanner._MASTER_CSV_FAILED = original_failed
 
-    assert results["AAPL"] is sentinel
-    assert results["MSFT"] == "yf:MSFT"
+    assert results["AAPL"].equals(base_df)
+    assert results["MSFT"].empty
     loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
-    assert yf_mock.call_args_list == [mock.call("MSFT")]
+    yf_mock.assert_not_called()
 
 
-def test_fetch_symbol_data_uses_yfinance_when_master_missing():
-    with mock.patch.object(pattern_scanner, "_load_symbol_from_master_csv", return_value=None) as loader:
-        with mock.patch.object(
-            pattern_scanner, "get_yf_data", side_effect=lambda sym: f"yf:{sym}"
-        ) as yf_mock:
-            original_path = pattern_scanner.MASTER_CSV_PATH
-            original_cache = pattern_scanner._MASTER_CSV_CACHE
-            original_failed = pattern_scanner._MASTER_CSV_FAILED
-            try:
-                pattern_scanner.MASTER_CSV_PATH = Path("dummy.csv")
-                pattern_scanner._MASTER_CSV_CACHE = None
-                pattern_scanner._MASTER_CSV_FAILED = False
+def test_fetch_symbol_data_skips_yfinance_when_data_current(monkeypatch):
+    import pandas as pd
 
-                results = pattern_scanner.fetch_symbol_data(["AAPL", "MSFT"])
-            finally:
-                pattern_scanner.MASTER_CSV_PATH = original_path
-                pattern_scanner._MASTER_CSV_CACHE = original_cache
-                pattern_scanner._MASTER_CSV_FAILED = original_failed
+    latest_date = date(2024, 1, 4)
+    base_df = pd.DataFrame(
+        {
+            "open": [100.0, 102.0],
+            "high": [101.0, 103.0],
+            "low": [99.0, 101.0],
+            "close": [100.5, 102.5],
+            "volume": [1_000_000, 1_200_000],
+        },
+        index=pd.to_datetime(["2024-01-03", "2024-01-04"], utc=True),
+    )
 
-    assert results == {"AAPL": "yf:AAPL", "MSFT": "yf:MSFT"}
-    loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
-    assert yf_mock.call_args_list == [mock.call("AAPL"), mock.call("MSFT")]
+    monkeypatch.setattr(pattern_scanner, "_latest_trading_day", lambda today=None: latest_date)
+
+    with mock.patch.object(pattern_scanner, "_load_symbol_from_master_csv", return_value=base_df) as loader:
+        with mock.patch.object(pattern_scanner, "_download_symbol_updates") as yf_mock:
+            results = pattern_scanner.fetch_symbol_data(["AAPL"])
+
+    assert results["AAPL"].equals(base_df)
+    loader.assert_called_once_with("AAPL")
+    yf_mock.assert_not_called()
 
 
 def test_update_master_csv_appends_and_deduplicates(tmp_path):
@@ -654,7 +664,7 @@ def test_update_master_csv_appends_and_deduplicates(tmp_path):
                     "close": [110.5],
                     "volume": [1_500_000],
                 },
-                index=pd.to_datetime(["2024-01-03"], utc=True),
+                index=pd.to_datetime(["2024-01-04"], utc=True),
             ),
             "MSFT": pd.DataFrame(
                 {
@@ -671,13 +681,14 @@ def test_update_master_csv_appends_and_deduplicates(tmp_path):
         pattern_scanner.update_master_csv(second_batch)
 
         updated = pd.read_csv(target_path, parse_dates=["date"])
-        assert len(updated) == 3
+        assert len(updated) == 4
 
         aapl_rows = updated[updated["symbol"] == "AAPL"]
-        refreshed_open = aapl_rows.loc[
-            aapl_rows["date"] == pd.Timestamp("2024-01-03", tz="UTC"), "open"
-        ].iloc[0]
-        assert refreshed_open == 110.0
+        assert set(aapl_rows["date"].dt.date) == {
+            pd.Timestamp("2024-01-02", tz="UTC").date(),
+            pd.Timestamp("2024-01-03", tz="UTC").date(),
+            pd.Timestamp("2024-01-04", tz="UTC").date(),
+        }
     finally:
         pattern_scanner.MASTER_CSV_PATH = original_path
         pattern_scanner._MASTER_CSV_CACHE = original_cache
