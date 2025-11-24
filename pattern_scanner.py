@@ -1089,6 +1089,14 @@ def _load_master_csv_table() -> Optional[pd.DataFrame]:
         return None
 
     column_map = {str(col).strip().lower(): col for col in getattr(table, "columns", [])}
+
+    # Gracefully handle common aliases used in upstream CSVs
+    if "symbol" not in column_map:
+        for alias in ("ticker",):
+            original = column_map.get(alias)
+            if original:
+                column_map["symbol"] = original
+                break
     missing = [col for col in _MASTER_CSV_REQUIRED_COLUMNS if col not in column_map]
     if missing:
         print(f" Master CSV is missing required columns: {missing}")
