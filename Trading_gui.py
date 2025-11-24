@@ -53,9 +53,11 @@ from pattern_scanner import (
     detect_bullish_rectangle,
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
+    load_symbol_from_master_csv,
     load_pattern_dataclass,
     WATCHLIST_PATH,
     WATCHLIST_HEADER,
+    MASTER_CSV_PATH,
 )
 from live_trading_gui import _load_env_file, _read_env
 
@@ -2164,19 +2166,50 @@ def flatten_yf_columns(df):
 
     return df
 
+
+def _get_symbol_dataframe(sym: str) -> Optional[pd.DataFrame]:
+    if sym in symbol_data:
+        return symbol_data[sym]
+
+    master_df = load_symbol_from_master_csv(sym)
+    if master_df is not None and not master_df.empty:
+        symbol_data[sym] = master_df
+        (DATA_DIR / f"{sym}.csv").parent.mkdir(parents=True, exist_ok=True)
+        master_df.to_csv(DATA_DIR / f"{sym}.csv")
+        return master_df
+
+    data_file = DATA_DIR / f"{sym}.csv"
+    if data_file.exists():
+        try:
+            cached = pd.read_csv(data_file, index_col=0, parse_dates=True)
+            symbol_data[sym] = cached
+            return cached
+        except Exception as exc:
+            print(f"Failed to load cached data for {sym}: {exc}")
+
+    try:
+        df = yf.download(sym, period="12mo", auto_adjust=False, progress=False)
+        df = flatten_yf_columns(df)
+    except Exception as exc:
+        print(f"Download failed for {sym}: {exc}")
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    symbol_data[sym] = df
+    df.to_csv(data_file)
+    return df
+
 def download_all_data():
     symbol_data.clear()
     if not WATCHLIST_PATH.exists():
         return
     df = pd.read_csv(WATCHLIST_PATH)
     for sym in df["symbol"]:
-        try:
-            data = yf.download(sym, period="12mo", progress=False)
-            data = flatten_yf_columns(data)
-            symbol_data[sym] = data
-            data.to_csv(DATA_DIR / f"{sym}.csv")
-        except Exception as e:
-            print(f"Download failed for {sym}: {e}")
+        loaded = _get_symbol_dataframe(sym)
+        if loaded is None or loaded.empty:
+            print(f"No data available for {sym} during download_all_data()")
 
 def show_candlestick():
     import matplotlib.pyplot as plt
@@ -2196,20 +2229,10 @@ def show_candlestick():
 
     pattern_value = value_by_column.get("pattern", "")
     pattern_name = str(pattern_value).strip() if pattern_value not in (None, "") else ""
-    data_file = DATA_DIR / f"{sym}.csv"
-    if sym not in symbol_data:
-        if data_file.exists():
-            symbol_data[sym] = pd.read_csv(data_file, index_col=0, parse_dates=True)
-        else:
-            df = yf.download(sym, period="12mo", auto_adjust=False, progress=False)
-            df = flatten_yf_columns(df)
-            if df.empty:
-                messagebox.showinfo("Chart", f"No data available for {sym}.")
-                return
-            symbol_data[sym] = df
-            df.to_csv(data_file)
-
-    df = symbol_data[sym]
+    df = _get_symbol_dataframe(sym)
+    if df is None or df.empty:
+        messagebox.showinfo("Chart", f"No data available for {sym}.")
+        return
 
     target_for_refresh = _consume_last_added_my_watchlist_symbol()
     _refresh_my_watchlist_list(target_symbol=target_for_refresh, current_symbol=sym)

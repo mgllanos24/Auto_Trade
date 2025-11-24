@@ -16,11 +16,16 @@ def _install_stub_modules() -> None:
         sys.modules["alpaca_trade_api"] = alpaca_stub
 
     if "pandas" not in sys.modules:
-        pandas_stub = types.ModuleType("pandas")
-        pandas_stub.DataFrame = object
-        pandas_stub.Series = object
-        pandas_stub.date_range = lambda *args, **kwargs: []
-        sys.modules["pandas"] = pandas_stub
+        try:
+            import pandas as _pandas  # type: ignore
+
+            sys.modules["pandas"] = _pandas
+        except Exception:
+            pandas_stub = types.ModuleType("pandas")
+            pandas_stub.DataFrame = object
+            pandas_stub.Series = object
+            pandas_stub.date_range = lambda *args, **kwargs: []
+            sys.modules["pandas"] = pandas_stub
 
     if "yfinance" not in sys.modules:
         yfinance_stub = types.ModuleType("yfinance")
@@ -28,82 +33,87 @@ def _install_stub_modules() -> None:
         sys.modules["yfinance"] = yfinance_stub
 
     if "numpy" not in sys.modules:
-        numpy_stub = types.ModuleType("numpy")
+        try:
+            import numpy as _numpy  # type: ignore
 
-        class _Array(list):
-            @property
-            def size(self):
-                return len(self)
+            sys.modules["numpy"] = _numpy
+        except Exception:
+            numpy_stub = types.ModuleType("numpy")
 
-            def max(self):
-                return max(self) if self else 0
+            class _Array(list):
+                @property
+                def size(self):
+                    return len(self)
 
-            def min(self):
-                return min(self) if self else 0
+                def max(self):
+                    return max(self) if self else 0
 
-            def mean(self):
-                return sum(self) / len(self) if self else 0
+                def min(self):
+                    return min(self) if self else 0
 
-            def reshape(self, _rows, cols):
-                if cols != 1:
-                    raise NotImplementedError("Stub reshape only supports single column")
-                return [[value] for value in self]
+                def mean(self):
+                    return sum(self) / len(self) if self else 0
 
-            def __getitem__(self, item):
-                if isinstance(item, slice):
-                    return _Array(list(super().__getitem__(item)))
-                if isinstance(item, list):
-                    return _Array([self[i] for i in item])
-                return super().__getitem__(item)
+                def reshape(self, _rows, cols):
+                    if cols != 1:
+                        raise NotImplementedError("Stub reshape only supports single column")
+                    return [[value] for value in self]
 
-        def _array(values, dtype=None):
-            return _Array(values)
+                def __getitem__(self, item):
+                    if isinstance(item, slice):
+                        return _Array(list(super().__getitem__(item)))
+                    if isinstance(item, list):
+                        return _Array([self[i] for i in item])
+                    return super().__getitem__(item)
 
-        def _arange(start, stop=None, step=1, **kwargs):
-            if stop is None:
-                stop = start
-                start = 0
-            result = _Array([])
-            current = start
-            while current < stop:
-                result.append(current)
-                current += step
-            return result
+            def _array(values, dtype=None):
+                return _Array(values)
 
-        def _linspace(start, stop, num, **kwargs):
-            if num <= 1:
-                return _Array([start])
-            step = (stop - start) / (num - 1)
-            return _Array([start + step * i for i in range(num)])
+            def _arange(start, stop=None, step=1, **kwargs):
+                if stop is None:
+                    stop = start
+                    start = 0
+                result = _Array([])
+                current = start
+                while current < stop:
+                    result.append(current)
+                    current += step
+                return result
 
-        def _diff(values):
-            return _Array([values[i + 1] - values[i] for i in range(len(values) - 1)])
+            def _linspace(start, stop, num, **kwargs):
+                if num <= 1:
+                    return _Array([start])
+                step = (stop - start) / (num - 1)
+                return _Array([start + step * i for i in range(num)])
 
-        def _argmax(values):
-            if not values:
-                return 0
-            max_idx = 0
-            max_val = values[0]
-            for idx, val in enumerate(values):
-                if val > max_val:
-                    max_idx = idx
-                    max_val = val
-            return max_idx
+            def _diff(values):
+                return _Array([values[i + 1] - values[i] for i in range(len(values) - 1)])
 
-        numpy_stub.array = _array
-        numpy_stub.asarray = _array
-        numpy_stub.arange = _arange
-        numpy_stub.linspace = _linspace
-        numpy_stub.diff = _diff
-        numpy_stub.argmax = _argmax
-        numpy_stub.any = lambda iterable: any(iterable)
-        numpy_stub.abs = abs
-        numpy_stub.sum = sum
-        numpy_stub.isnan = lambda *args, **kwargs: False
-        numpy_stub.ndarray = _Array
-        numpy_stub.less = lambda a, b: a < b
-        numpy_stub.greater = lambda a, b: a > b
-        sys.modules["numpy"] = numpy_stub
+            def _argmax(values):
+                if not values:
+                    return 0
+                max_idx = 0
+                max_val = values[0]
+                for idx, val in enumerate(values):
+                    if val > max_val:
+                        max_idx = idx
+                        max_val = val
+                return max_idx
+
+            numpy_stub.array = _array
+            numpy_stub.asarray = _array
+            numpy_stub.arange = _arange
+            numpy_stub.linspace = _linspace
+            numpy_stub.diff = _diff
+            numpy_stub.argmax = _argmax
+            numpy_stub.any = lambda iterable: any(iterable)
+            numpy_stub.abs = abs
+            numpy_stub.sum = sum
+            numpy_stub.isnan = lambda *args, **kwargs: False
+            numpy_stub.ndarray = _Array
+            numpy_stub.less = lambda a, b: a < b
+            numpy_stub.greater = lambda a, b: a > b
+            sys.modules["numpy"] = numpy_stub
 
     numpy_mod = sys.modules.get("numpy")
     if numpy_mod is not None:
@@ -599,3 +609,76 @@ def test_fetch_symbol_data_uses_yfinance_when_master_missing():
     assert results == {"AAPL": "yf:AAPL", "MSFT": "yf:MSFT"}
     loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
     assert yf_mock.call_args_list == [mock.call("AAPL"), mock.call("MSFT")]
+
+
+def test_update_master_csv_appends_and_deduplicates(tmp_path):
+    import pandas as pd
+
+    original_path = pattern_scanner.MASTER_CSV_PATH
+    original_cache = pattern_scanner._MASTER_CSV_CACHE
+    original_failed = pattern_scanner._MASTER_CSV_FAILED
+    target_path = tmp_path / "us_liquid_stocks_ohlcv_last2y.csv"
+
+    try:
+        pattern_scanner.MASTER_CSV_PATH = target_path
+        pattern_scanner._MASTER_CSV_CACHE = None
+        pattern_scanner._MASTER_CSV_FAILED = False
+
+        first_batch = {
+            "AAPL": pd.DataFrame(
+                {
+                    "open": [100.0, 102.0],
+                    "high": [101.0, 103.0],
+                    "low": [99.0, 101.0],
+                    "close": [100.5, 102.5],
+                    "volume": [1_000_000, 1_200_000],
+                },
+                index=pd.to_datetime(["2024-01-02", "2024-01-03"], utc=True),
+            )
+        }
+
+        pattern_scanner.update_master_csv(first_batch)
+
+        saved = pd.read_csv(target_path, parse_dates=["date"])
+        assert set(["symbol", "date", "open", "high", "low", "close", "volume"]).issubset(
+            set(saved.columns)
+        )
+        assert len(saved) == 2
+
+        second_batch = {
+            "AAPL": pd.DataFrame(
+                {
+                    "open": [110.0],
+                    "high": [111.0],
+                    "low": [109.0],
+                    "close": [110.5],
+                    "volume": [1_500_000],
+                },
+                index=pd.to_datetime(["2024-01-03"], utc=True),
+            ),
+            "MSFT": pd.DataFrame(
+                {
+                    "open": [200.0],
+                    "high": [201.0],
+                    "low": [199.0],
+                    "close": [200.5],
+                    "volume": [2_000_000],
+                },
+                index=pd.to_datetime(["2024-01-02"], utc=True),
+            ),
+        }
+
+        pattern_scanner.update_master_csv(second_batch)
+
+        updated = pd.read_csv(target_path, parse_dates=["date"])
+        assert len(updated) == 3
+
+        aapl_rows = updated[updated["symbol"] == "AAPL"]
+        refreshed_open = aapl_rows.loc[
+            aapl_rows["date"] == pd.Timestamp("2024-01-03", tz="UTC"), "open"
+        ].iloc[0]
+        assert refreshed_open == 110.0
+    finally:
+        pattern_scanner.MASTER_CSV_PATH = original_path
+        pattern_scanner._MASTER_CSV_CACHE = original_cache
+        pattern_scanner._MASTER_CSV_FAILED = original_failed
