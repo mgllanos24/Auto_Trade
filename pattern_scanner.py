@@ -85,6 +85,7 @@ _MASTER_CSV_REQUIRED_COLUMNS = (
 _MASTER_CSV_OPTIONAL_COLUMNS = ("adj_close",)
 _MASTER_CSV_CACHE: Optional[pd.DataFrame] = None
 _MASTER_CSV_FAILED = False
+_MASTER_CSV_MTIME: Optional[float] = None
 
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")
 TIINGO_API_KEY = os.environ.get("TIINGO_API_KEY")
@@ -1049,7 +1050,7 @@ def _recover_with_fallback(symbol: str) -> Optional[pd.DataFrame]:
 
 
 def _load_master_csv_table() -> Optional[pd.DataFrame]:
-    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED
+    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED, _MASTER_CSV_MTIME
 
     if MASTER_CSV_PATH is None:
         return None
@@ -1058,7 +1059,13 @@ def _load_master_csv_table() -> Optional[pd.DataFrame]:
         return None
 
     if _MASTER_CSV_CACHE is not None:
-        return _MASTER_CSV_CACHE
+        try:
+            if MASTER_CSV_PATH.exists():
+                mtime = MASTER_CSV_PATH.stat().st_mtime
+                if _MASTER_CSV_MTIME == mtime:
+                    return _MASTER_CSV_CACHE
+        except Exception:
+            pass
 
     if not hasattr(pd, "read_csv"):
         print(" Pandas does not provide read_csv(); master CSV disabled")
@@ -1143,6 +1150,10 @@ def _load_master_csv_table() -> Optional[pd.DataFrame]:
     table = table.sort_values(["symbol", "date"])
 
     _MASTER_CSV_CACHE = table
+    try:
+        _MASTER_CSV_MTIME = MASTER_CSV_PATH.stat().st_mtime
+    except Exception:
+        _MASTER_CSV_MTIME = None
     return _MASTER_CSV_CACHE
 
 
@@ -1284,6 +1295,41 @@ def update_master_csv(data_by_symbol: Dict[str, pd.DataFrame]) -> Optional[Path]
     for column in missing_in_new:
         new_rows[column] = np.nan
 
+    try:
+        new_rows["date"] = pd.to_datetime(new_rows["date"], errors="coerce", utc=True)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    try:
+        existing["date"] = pd.to_datetime(existing["date"], errors="coerce", utc=True)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    latest_existing: Dict[str, pd.Timestamp] = {}
+    try:
+        if not existing.empty:
+            grouped = existing.dropna(subset=["symbol", "date"]).groupby("symbol")
+            latest_existing = grouped["date"].max().to_dict()
+    except Exception:  # pragma: no cover - defensive
+        latest_existing = {}
+
+    def _is_newer(row):
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol:
+            return False
+        latest = latest_existing.get(symbol)
+        if latest is None:
+            return True
+        date_value = row.get("date")
+        if pd.isna(date_value):
+            return False
+        return date_value > latest
+
+    try:
+        if hasattr(new_rows, "iterrows"):
+            new_rows = new_rows[[_is_newer(row) for _, row in new_rows.iterrows()]]
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     populated_optional = [
         col
         for col in optional_cols
@@ -1293,11 +1339,6 @@ def update_master_csv(data_by_symbol: Dict[str, pd.DataFrame]) -> Optional[Path]
     all_columns = [*_MASTER_CSV_REQUIRED_COLUMNS, *populated_optional]
     new_rows = new_rows[all_columns]
     existing = existing.reindex(columns=all_columns)
-    try:
-        new_rows["date"] = pd.to_datetime(new_rows["date"], errors="coerce", utc=True)
-        existing["date"] = pd.to_datetime(existing["date"], errors="coerce", utc=True)
-    except Exception:  # pragma: no cover - defensive
-        pass
 
     if existing.empty:
         combined = new_rows.copy()
@@ -1316,10 +1357,27 @@ def update_master_csv(data_by_symbol: Dict[str, pd.DataFrame]) -> Optional[Path]
         print(f" Failed to write master CSV {target_path}: {exc}")
         return None
 
-    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED
+    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED, _MASTER_CSV_MTIME
     _MASTER_CSV_CACHE = None
     _MASTER_CSV_FAILED = False
+    try:
+        _MASTER_CSV_MTIME = target_path.stat().st_mtime
+    except Exception:
+        _MASTER_CSV_MTIME = None
     return target_path
+
+
+def _latest_trading_day(today: Optional[date] = None) -> date:
+    """Return the most recent expected trading day (Mon–Fri)."""
+
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+
+    weekday = today.weekday()
+    if weekday >= 5:
+        offset = weekday - 4
+        return today - timedelta(days=offset)
+    return today
 
 
 def get_yf_data(symbol):
@@ -1363,37 +1421,67 @@ def get_yf_data(symbol):
     return cleaned
 
 
+def _download_symbol_updates(symbol: str, last_date: Optional[pd.Timestamp]) -> Optional[pd.DataFrame]:
+    if last_date is None or pd.isna(last_date):
+        return None
+
+    start_date = (last_date + timedelta(days=1)).date()
+    latest_expected = _latest_trading_day()
+    if start_date > latest_expected:
+        return None
+
+    try:
+        raw = yf.download(
+            symbol,
+            start=start_date,
+            end=latest_expected + timedelta(days=1),
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+        )
+    except Exception:
+        return None
+
+    return _normalise_yf_response(symbol, raw)
+
+
 def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str, pd.DataFrame]:
     results: Dict[str, pd.DataFrame] = {}
     if not symbols:
         return results
 
-    symbols_to_download: List[str] = []
+    latest_expected = _latest_trading_day()
 
-    if MASTER_CSV_PATH is not None:
-        for symbol in symbols:
-            csv_df = _load_symbol_from_master_csv(symbol)
-            if csv_df is not None and not csv_df.empty:
-                results[symbol] = csv_df
-            else:
-                symbols_to_download.append(symbol)
-    else:
-        symbols_to_download = list(symbols)
+    for symbol in symbols:
+        csv_df = _load_symbol_from_master_csv(symbol)
+        if csv_df is None or csv_df.empty:
+            results[symbol] = pd.DataFrame()
+            continue
 
-    if not symbols_to_download:
-        return results
+        last_date = None
+        try:
+            last_date = csv_df.index.max()
+        except Exception:
+            pass
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_symbol = {
-            executor.submit(get_yf_data, symbol): symbol for symbol in symbols_to_download
-        }
-        for future in as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
-            try:
-                results[symbol] = future.result()
-            except Exception as exc:
-                print(f" Error fetching {symbol}: {exc}")
-                results[symbol] = pd.DataFrame()
+        if last_date is not None and getattr(last_date, "date", None):
+            last_date_value = last_date.date()
+        else:
+            last_date_value = None
+
+        if last_date_value is not None and last_date_value >= latest_expected:
+            results[symbol] = csv_df
+            continue
+
+        new_data = _download_symbol_updates(symbol, last_date)
+        if new_data is not None and not new_data.empty:
+            combined = pd.concat([csv_df, new_data])
+            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            results[symbol] = combined
+            update_master_csv({symbol: new_data})
+            _store_cached_data(symbol, combined)
+        else:
+            results[symbol] = csv_df
 
     return results
 
