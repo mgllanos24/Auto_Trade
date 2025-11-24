@@ -50,6 +50,11 @@ def _resolve_master_csv_path(data_dir: Path) -> Path:
     env_path = os.environ.get("AUTO_TRADE_MASTER_CSV")
     if env_path:
         return Path(env_path).expanduser()
+
+    packaged_copy = SCRIPT_DIR / "us_liquid_stocks_ohlcv_last2y.csv"
+    if packaged_copy.exists():
+        return packaged_copy
+
     return data_dir / "us_liquid_stocks_ohlcv_last2y.csv"
 
 
