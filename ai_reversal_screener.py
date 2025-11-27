@@ -5,7 +5,7 @@ AI‑ASSISTED 1–3 DAY TREND REVERSAL SCREENER (Robust CLI + Self‑Tests)
 What changed (to fix SystemExit: 2)
 ----------------------------------
 • `--symbols` is no longer *required*; if omitted, the script runs a demo with
-  defaults: ["AAPL", "MSFT", "SPY"]. This prevents `argparse` from raising
+  defaults sourced from the approved universe in ``build_ohlcv_last2y``. This prevents `argparse` from raising
   `SystemExit: 2` when you just run `python ai_reversal_screener.py`.
 • `parse_args(list_args: Optional[List[str]])` now supports programmatic testing.
 • Added `--self-test` to run quick unit tests (no internet required).
@@ -31,6 +31,8 @@ import warnings
 
 import numpy as np
 import pandas as pd
+
+from build_ohlcv_last2y import TICKERS as MASTER_TICKERS
 
 # Optional imports – fail gracefully if missing
 try:
@@ -286,6 +288,26 @@ class ScreenResult:
 
 
 def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_syms: List[str], from_csv: Optional[str]) -> pd.DataFrame:
+    allowed = set(MASTER_TICKERS)
+    filtered_symbols = [s for s in symbols if s in allowed]
+    skipped = [s for s in symbols if s not in allowed]
+
+    if skipped:
+        print("[WARN] The following symbols are not in the approved universe and will be skipped:", " ".join(skipped))
+    if not filtered_symbols:
+        print("[WARN] No valid symbols to screen after applying the approved universe filter.")
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "prob_reversal_1_3d",
+                "auc",
+                "precision_top20",
+                "recent_return_5d",
+                "rsi14",
+                "slope_5",
+            ]
+        )
+
     # Load intermarket series
     inter_data: Dict[str, pd.DataFrame] = {}
     for s in inter_syms:
@@ -296,7 +318,7 @@ def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_sym
 
     results: List[ScreenResult] = []
 
-    for sym in symbols:
+    for sym in filtered_symbols:
         try:
             df = load_prices(sym, start=start, end=end, from_csv=from_csv)
             if len(df) < 600:
@@ -329,8 +351,24 @@ def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_sym
                 )
             )
         except Exception as e:
+            import traceback
+
             print(f"[ERROR] {sym}: {e}")
+            traceback.print_exc()
             continue
+
+    if not results:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "prob_reversal_1_3d",
+                "auc",
+                "precision_top20",
+                "recent_return_5d",
+                "rsi14",
+                "slope_5",
+            ]
+        )
 
     out = pd.DataFrame([r.__dict__ for r in results]).sort_values("prob_reversal_1_3d", ascending=False)
     return out
@@ -416,9 +454,10 @@ def main():
         return
 
     # Default symbols if none were provided (prevents argparse SystemExit 2 on bare run)
-    symbols = args.symbols or ["AAPL", "MSFT", "SPY"]
+    default_symbols = MASTER_TICKERS[:3]
+    symbols = args.symbols or default_symbols
     if args.symbols is None:
-        print("[INFO] No --symbols provided. Running demo with: AAPL MSFT SPY\n")
+        print(f"[INFO] No --symbols provided. Running demo with: {' '.join(default_symbols)}\n")
 
     table = screen_symbols(symbols, args.start, args.end, args.intermarket, args.from_csv)
     pd.set_option("display.max_columns", None)
