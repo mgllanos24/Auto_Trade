@@ -171,7 +171,9 @@ def _select_close(df: pd.DataFrame) -> pd.Series:
 
 
 def make_features(df: pd.DataFrame, intermarket: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
-    o, h, l, c, v = df["Open"], df["High"], df["Low"], _select_close(df).rename("Close"), df["Volume"]
+    c = _select_close(df).copy()
+    c.name = "Close"
+    o, h, l, v = df["Open"], df["High"], df["Low"], df["Volume"]
 
     feats = pd.DataFrame(index=df.index)
 
