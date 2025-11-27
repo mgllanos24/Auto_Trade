@@ -154,8 +154,22 @@ def linreg_slope(series: pd.Series, window: int = 5) -> pd.Series:
 # Feature engineering
 # -----------------------------
 
+def _select_close(df: pd.DataFrame) -> pd.Series:
+    """Return the best available close/adjusted-close series.
+
+    The cached CSVs for this project only contain ``close`` (lowercase), while
+    yfinance provides ``Adj Close``. To support both sources seamlessly we try a
+    few common column names before raising a clear error.
+    """
+
+    for column in ("Adj Close", "adj_close", "Close", "close"):
+        if column in df.columns:
+            return df[column]
+    raise KeyError("Expected a close price column (Adj Close/Close/close) in DataFrame")
+
+
 def make_features(df: pd.DataFrame, intermarket: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
-    o, h, l, c, v = df["Open"], df["High"], df["Low"], df["Adj Close"].rename("Close"), df["Volume"]
+    o, h, l, c, v = df["Open"], df["High"], df["Low"], _select_close(df).rename("Close"), df["Volume"]
 
     feats = pd.DataFrame(index=df.index)
 
@@ -181,7 +195,7 @@ def make_features(df: pd.DataFrame, intermarket: Optional[Dict[str, pd.DataFrame
     # Intermarket proxies (optional): add their 1/5/10d returns
     if intermarket:
         for name, idf in intermarket.items():
-            ic = idf["Adj Close"].rename(f"{name}_c")
+            ic = _select_close(idf).rename(f"{name}_c")
             feats[f"{name}_ret1"] = ic.pct_change(1)
             feats[f"{name}_ret5"] = ic.pct_change(5)
             feats[f"{name}_ret10"] = ic.pct_change(10)
@@ -290,7 +304,7 @@ def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_sym
                 continue
 
             feats = make_features(df, inter_data)
-            labels = make_labels(df["Adj Close"].rename("Close"))
+            labels = make_labels(_select_close(df).rename("Close"))
             aligned = feats.join(labels.rename("y"))
 
             if aligned["y"].dropna().empty:
@@ -309,7 +323,7 @@ def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_sym
                     prob_reversal_1_3d=prob,
                     auc=float(res["auc"]),
                     precision_top20=float(res["precision_top20"]),
-                    recent_return_5d=float(df["Adj Close"].pct_change(5).iloc[-1]),
+                    recent_return_5d=float(_select_close(df).pct_change(5).iloc[-1]),
                     rsi14=float(feats["rsi14"].iloc[-1]),
                     slope_5=float(feats["slope_5"].iloc[-1]),
                 )
@@ -367,16 +381,16 @@ def run_self_tests() -> None:
             self.df = _generate_dummy_prices()
 
         def test_rsi_bounds(self):
-            r = rsi(self.df["Adj Close"])  # should be within [0, 100]
+            r = rsi(_select_close(self.df))  # should be within [0, 100]
             self.assertTrue((r.dropna() >= 0).all())
             self.assertTrue((r.dropna() <= 100).all())
 
         def test_macd_cols(self):
-            m = macd(self.df["Adj Close"])  # has columns
+            m = macd(_select_close(self.df))  # has columns
             self.assertTrue(set(["macd", "macd_signal", "macd_hist"]).issubset(m.columns))
 
         def test_labels_binary(self):
-            y = make_labels(self.df["Adj Close"]).dropna()
+            y = make_labels(_select_close(self.df)).dropna()
             self.assertTrue(set(y.unique()).issubset({0, 1}))
 
     class TestCLI(unittest.TestCase):
