@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import json
 import yfinance as yf
@@ -1174,6 +1175,30 @@ def _load_master_csv_table() -> Optional[pd.DataFrame]:
     except Exception:
         _MASTER_CSV_MTIME = None
     return _MASTER_CSV_CACHE
+
+
+def list_symbols_from_master_csv() -> List[str]:
+    """Return a sorted list of unique symbols present in the master CSV.
+
+    The helper is intended for CLI callers that want to scan every ticker
+    already present in ``MASTER_CSV_PATH`` (for example, after running
+    ``update_us_liquid_stocks.py``).  It reuses the cached master table when
+    available to avoid unnecessary disk I/O.
+    """
+
+    table = _load_master_csv_table()
+    if table is None or table.empty:
+        return []
+
+    try:
+        symbols = table.get("symbol")
+        if symbols is None:
+            return []
+
+        unique = [str(value).strip().upper() for value in symbols.dropna().unique()]
+        return sorted(symbol for symbol in unique if symbol)
+    except Exception:
+        return []
 
 
 def _load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
@@ -2553,6 +2578,58 @@ def _demo_ascending_triangle_detection():
     pattern_detected = detect_ascending_triangle(df, window=60, tolerance=0.02, min_touches=2)
     print("Synthetic ascending triangle detected:", pattern_detected)
 
+
+def _load_symbols_from_file(path: Path) -> List[str]:
+    try:
+        with path.open("r") as handle:
+            return [line.strip() for line in handle.readlines() if line.strip()]
+    except FileNotFoundError:
+        print(f" {path} not found.")
+        return []
+
+
+def _run_cli():
+    parser = argparse.ArgumentParser(description="Scan symbols for bullish patterns")
+    parser.add_argument(
+        "-f",
+        "--symbols-file",
+        type=Path,
+        default=Path("filtered_symbols.txt"),
+        help="Path to a text file with one symbol per line (default: filtered_symbols.txt)",
+    )
+    parser.add_argument(
+        "--from-master",
+        action="store_true",
+        help="Scan every symbol available in the configured master CSV",
+    )
+    parser.add_argument(
+        "--skip-demo",
+        action="store_true",
+        help="Skip the synthetic ascending triangle demonstration",
+    )
+
+    args = parser.parse_args()
+
+    if not args.skip_demo:
+        _demo_ascending_triangle_detection()
+
+    symbols: List[str] = []
+    if args.from_master:
+        symbols = list_symbols_from_master_csv()
+        if symbols:
+            print(f" Loaded {len(symbols)} symbols from master CSV at {MASTER_CSV_PATH}")
+        else:
+            print(" Master CSV did not yield any symbols; falling back to symbols file")
+
+    if not symbols:
+        symbols = _load_symbols_from_file(args.symbols_file)
+
+    if not symbols:
+        print(" No symbols to scan. Provide a symbols file or use --from-master.")
+        return
+
+    scan_all_symbols(symbols)
+
 def scan_all_symbols(symbols):
     initialize_watchlist()
     disqualified = []
@@ -2694,12 +2771,4 @@ def scan_all_symbols(symbols):
         print(f"\n Saved disqualified symbols to disqualified.csv")
 
 if __name__ == '__main__':
-    _demo_ascending_triangle_detection()
-    try:
-        with open('filtered_symbols.txt', 'r') as f:
-            symbols = [line.strip() for line in f.readlines()]
-    except FileNotFoundError:
-        print(" filtered_symbols.txt not found.")
-        symbols = []
-    if symbols:
-        scan_all_symbols(symbols)
+    _run_cli()

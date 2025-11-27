@@ -82,6 +82,31 @@ the file by setting `AUTO_TRADE_MASTER_LOOKBACK_DAYS` to a positive
 integer. Rows newer than that many days relative to the latest entry per
 symbol are passed into the scanners; older data is ignored.
 
+### Running the bundled update + scan workflow
+
+The repository includes a simple end-to-end flow that refreshes a
+pre-filtered universe of liquid U.S. tickers and then scans them for bullish
+setups:
+
+1. Update the bundled master CSV (kept at ``us_liquid_stocks_ohlcv_last2y.csv``)
+   by running:
+
+   ```bash
+   python update_us_liquid_stocks.py
+   ```
+
+2. Scan every symbol in that CSV and append qualifying patterns to your
+   watchlist (by default stored at ``~/.auto_trade/watchlist.csv``):
+
+   ```bash
+   python pattern_scanner.py --from-master
+   ```
+
+   You can still target a custom list of tickers via a symbols file
+   (one ticker per line) using ``--symbols-file path/to/file.txt``. When no
+   symbols are found, the scanner exits with a helpful message instead of
+   failing.
+
 ## Working with the screener
 
 1. Configure the screener parameters (optional). The defaults from
