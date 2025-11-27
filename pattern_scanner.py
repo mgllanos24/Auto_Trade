@@ -1446,11 +1446,13 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
         return results
 
     latest_expected = _latest_trading_day()
+    last_dates: Dict[str, Optional[date]] = {}
 
     for symbol in symbols:
         csv_df = _load_symbol_from_master_csv(symbol)
         if csv_df is None or csv_df.empty:
             results[symbol] = pd.DataFrame()
+            last_dates[symbol] = None
             continue
 
         last_date = None
@@ -1460,12 +1462,28 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
             pass
 
         if last_date is not None and getattr(last_date, "date", None):
-            last_date_value = last_date.date()
+            last_dates[symbol] = last_date.date()
         else:
-            last_date_value = None
+            last_dates[symbol] = None
+
+        results[symbol] = csv_df
+
+    latest_available = max((d for d in last_dates.values() if d is not None), default=None)
+    if latest_available is not None and latest_expected > latest_available:
+        confirmations = sum(1 for d in last_dates.values() if d == latest_available)
+        if confirmations >= 3 and (latest_expected - latest_available).days <= 3:
+            print(
+                f" Detected {confirmations} symbols capped at {latest_available}; "
+                "assuming that was the most recent trading day."
+            )
+            latest_expected = latest_available
+
+    for symbol, last_date_value in last_dates.items():
+        csv_df = results[symbol]
+        if csv_df is None or csv_df.empty:
+            continue
 
         if last_date_value is not None and last_date_value >= latest_expected:
-            results[symbol] = csv_df
             continue
 
         if last_date_value is None:
@@ -1476,7 +1494,6 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
             print(
                 f" Data for {symbol} is stale (latest {last_date_value}); run build_ohlcv_last2y.py for updates."
             )
-        results[symbol] = csv_df
 
     return results
 
