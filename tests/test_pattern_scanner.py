@@ -655,6 +655,42 @@ def test_fetch_symbol_data_skips_yfinance_when_data_current(monkeypatch):
     loader.assert_called_once_with("AAPL")
 
 
+def test_fetch_symbol_data_handles_holiday_gap(monkeypatch, capsys):
+    import pandas as pd
+
+    holiday_date = date(2025, 11, 27)
+    last_trading_day = date(2025, 11, 26)
+
+    base_df = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1_000_000],
+        },
+        index=pd.to_datetime([last_trading_day.isoformat()], utc=True),
+    )
+
+    monkeypatch.setattr(pattern_scanner, "_latest_trading_day", lambda today=None: holiday_date)
+
+    with mock.patch.object(
+        pattern_scanner,
+        "_load_symbol_from_master_csv",
+        side_effect=lambda symbol: base_df,
+    ) as loader:
+        results = pattern_scanner.fetch_symbol_data(["EOG", "CME", "CMCSA"])
+
+    captured = capsys.readouterr()
+    assert "Detected 3 symbols capped at 2025-11-26" in captured.out
+    assert "stale" not in captured.out.lower()
+
+    for df in results.values():
+        assert df.equals(base_df)
+
+    assert loader.call_count == 3
+
+
 def test_update_master_csv_appends_and_deduplicates(tmp_path):
     import pandas as pd
 
