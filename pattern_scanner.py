@@ -544,15 +544,22 @@ def _normalise_yf_response(symbol: str, raw: pd.DataFrame) -> Optional[pd.DataFr
     return df[numeric_cols]
 
 
-def _download_with_yf_history(symbol: str) -> Optional[pd.DataFrame]:
-    try:
-        ticker = yf.Ticker(symbol)
-        history = ticker.history(period='1y', interval='1d', auto_adjust=False)
-    except Exception as exc:
-        print(f" Secondary yfinance history failed for {symbol}: {exc}")
-        return None
+def _download_with_yf_history(
+    symbol: str, *, periods: Sequence[str] = ("1y", "5y", "max")
+) -> Optional[pd.DataFrame]:
+    for period in periods:
+        try:
+            ticker = yf.Ticker(symbol)
+            history = ticker.history(period=period, interval='1d', auto_adjust=False)
+        except Exception as exc:
+            print(f" Secondary yfinance history failed for {symbol} ({period}): {exc}")
+            continue
 
-    return _normalise_yf_response(symbol, history)
+        cleaned = _normalise_yf_response(symbol, history)
+        if cleaned is not None:
+            return cleaned
+
+    return None
 
 
 def compute_precomputed_indicators(df: pd.DataFrame) -> PrecomputedIndicators:
@@ -630,6 +637,18 @@ def _store_cached_data(symbol: str, df: pd.DataFrame) -> None:
         df.to_csv(path, index_label='Date')
     except Exception as exc:
         print(f" Failed to write cache for {symbol}: {exc}")
+
+
+def _load_master_for_cache(symbol: str) -> Optional[pd.DataFrame]:
+    """Load master CSV rows for *symbol* and persist them in the cache."""
+
+    master_df = _load_symbol_from_master_csv(symbol)
+    if master_df is None or master_df.empty:
+        return None
+
+    print(f" Using master CSV data for {symbol}")
+    _store_cached_data(symbol, master_df)
+    return master_df
 
 
 def _apply_split_adjustments(df: pd.DataFrame) -> None:
@@ -1403,6 +1422,10 @@ def get_yf_data(symbol):
         fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
+
+        master = _load_master_for_cache(symbol)
+        if master is not None:
+            return master
         return pd.DataFrame()
 
     cleaned = _normalise_yf_response(symbol, raw)
@@ -1415,6 +1438,10 @@ def get_yf_data(symbol):
         fallback = _recover_with_fallback(symbol)
         if fallback is not None:
             return fallback
+
+        master = _load_master_for_cache(symbol)
+        if master is not None:
+            return master
         return pd.DataFrame()
 
     _store_cached_data(symbol, cleaned)
