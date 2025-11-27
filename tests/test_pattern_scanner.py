@@ -541,31 +541,19 @@ def test_get_yf_data_falls_back_to_master(monkeypatch):
         ),
     )
 
-    # Pretend yfinance returns a single unusable row so the master CSV is needed.
-    bad_history = pd.DataFrame(
-        {
-            "Open": [105.0],
-            "High": [106.0],
-            "Low": [104.0],
-            "Close": [105.5],
-            "Adj Close": [105.5],
-            "Volume": [500_000],
-        },
-        index=pd.to_datetime(["2024-02-01"], utc=True),
-    )
-
     monkeypatch.setattr(pattern_scanner, "_load_cached_data", lambda symbol: None)
     monkeypatch.setattr(pattern_scanner, "_recover_with_fallback", lambda symbol: None)
     monkeypatch.setattr(pattern_scanner, "_download_with_yf_history", lambda symbol: None)
     monkeypatch.setattr(pattern_scanner, "_store_cached_data", lambda symbol, df: None)
     monkeypatch.setattr(pattern_scanner, "_load_symbol_from_master_csv", lambda symbol: master_df)
-    monkeypatch.setattr(pattern_scanner.yf, "download", lambda *a, **k: bad_history)
 
-    result = pattern_scanner.get_yf_data("ORCL")
+    with mock.patch.object(pattern_scanner.yf, "download") as yf_mock:
+        result = pattern_scanner.get_yf_data("ORCL")
 
     assert result is not None
     assert len(result) == len(master_df)
     assert (result.index == master_df.index).all()
+    yf_mock.assert_not_called()
 
 
 def test_calculate_rr_price_action_uses_recent_swing_high(monkeypatch):
@@ -624,25 +612,23 @@ def test_fetch_symbol_data_prefers_master_csv(monkeypatch):
     with mock.patch.object(
         pattern_scanner, "_load_symbol_from_master_csv", side_effect=fake_loader
     ) as loader:
-        with mock.patch.object(pattern_scanner, "_download_symbol_updates") as yf_mock:
-            original_path = pattern_scanner.MASTER_CSV_PATH
-            original_cache = pattern_scanner._MASTER_CSV_CACHE
-            original_failed = pattern_scanner._MASTER_CSV_FAILED
-            try:
-                pattern_scanner.MASTER_CSV_PATH = Path("dummy.csv")
-                pattern_scanner._MASTER_CSV_CACHE = None
-                pattern_scanner._MASTER_CSV_FAILED = False
+        original_path = pattern_scanner.MASTER_CSV_PATH
+        original_cache = pattern_scanner._MASTER_CSV_CACHE
+        original_failed = pattern_scanner._MASTER_CSV_FAILED
+        try:
+            pattern_scanner.MASTER_CSV_PATH = Path("dummy.csv")
+            pattern_scanner._MASTER_CSV_CACHE = None
+            pattern_scanner._MASTER_CSV_FAILED = False
 
-                results = pattern_scanner.fetch_symbol_data(["AAPL", "MSFT"])
-            finally:
-                pattern_scanner.MASTER_CSV_PATH = original_path
-                pattern_scanner._MASTER_CSV_CACHE = original_cache
-                pattern_scanner._MASTER_CSV_FAILED = original_failed
+            results = pattern_scanner.fetch_symbol_data(["AAPL", "MSFT"])
+        finally:
+            pattern_scanner.MASTER_CSV_PATH = original_path
+            pattern_scanner._MASTER_CSV_CACHE = original_cache
+            pattern_scanner._MASTER_CSV_FAILED = original_failed
 
     assert results["AAPL"].equals(base_df)
     assert results["MSFT"].empty
     loader.assert_has_calls([mock.call("AAPL"), mock.call("MSFT")])
-    yf_mock.assert_not_called()
 
 
 def test_fetch_symbol_data_skips_yfinance_when_data_current(monkeypatch):
@@ -663,12 +649,10 @@ def test_fetch_symbol_data_skips_yfinance_when_data_current(monkeypatch):
     monkeypatch.setattr(pattern_scanner, "_latest_trading_day", lambda today=None: latest_date)
 
     with mock.patch.object(pattern_scanner, "_load_symbol_from_master_csv", return_value=base_df) as loader:
-        with mock.patch.object(pattern_scanner, "_download_symbol_updates") as yf_mock:
-            results = pattern_scanner.fetch_symbol_data(["AAPL"])
+        results = pattern_scanner.fetch_symbol_data(["AAPL"])
 
     assert results["AAPL"].equals(base_df)
     loader.assert_called_once_with("AAPL")
-    yf_mock.assert_not_called()
 
 
 def test_update_master_csv_appends_and_deduplicates(tmp_path):

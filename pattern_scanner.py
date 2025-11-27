@@ -1429,72 +1429,15 @@ def get_yf_data(symbol):
     if cached is not None:
         return cached
 
-    try:
-        raw = yf.download(
-            symbol,
-            period='1y',
-            interval='1d',
-            progress=False,
-            auto_adjust=False,
-        )
-    except Exception as exc:
-        print(f" Error downloading {symbol}: {exc}")
-        fallback = _download_with_yf_history(symbol)
-        if fallback is not None:
-            _store_cached_data(symbol, fallback)
-            return fallback
+    master = _load_master_for_cache(symbol)
+    if master is not None:
+        _store_cached_data(symbol, master)
+        return master
 
-        fallback = _recover_with_fallback(symbol)
-        if fallback is not None:
-            return fallback
-
-        master = _load_master_for_cache(symbol)
-        if master is not None:
-            return master
-        return pd.DataFrame()
-
-    cleaned = _normalise_yf_response(symbol, raw)
-    if cleaned is None:
-        fallback = _download_with_yf_history(symbol)
-        if fallback is not None:
-            _store_cached_data(symbol, fallback)
-            return fallback
-
-        fallback = _recover_with_fallback(symbol)
-        if fallback is not None:
-            return fallback
-
-        master = _load_master_for_cache(symbol)
-        if master is not None:
-            return master
-        return pd.DataFrame()
-
-    _store_cached_data(symbol, cleaned)
-    return cleaned
-
-
-def _download_symbol_updates(symbol: str, last_date: Optional[pd.Timestamp]) -> Optional[pd.DataFrame]:
-    if last_date is None or pd.isna(last_date):
-        return None
-
-    start_date = (last_date + timedelta(days=1)).date()
-    latest_expected = _latest_trading_day()
-    if start_date > latest_expected:
-        return None
-
-    try:
-        raw = yf.download(
-            symbol,
-            start=start_date,
-            end=latest_expected + timedelta(days=1),
-            interval="1d",
-            progress=False,
-            auto_adjust=False,
-        )
-    except Exception:
-        return None
-
-    return _normalise_yf_response(symbol, raw)
+    print(
+        f" No cached data for {symbol}. Please run build_ohlcv_last2y.py to refresh the master CSV."
+    )
+    return pd.DataFrame()
 
 
 def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str, pd.DataFrame]:
@@ -1525,15 +1468,15 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
             results[symbol] = csv_df
             continue
 
-        new_data = _download_symbol_updates(symbol, last_date)
-        if new_data is not None and not new_data.empty:
-            combined = pd.concat([csv_df, new_data])
-            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-            results[symbol] = combined
-            update_master_csv({symbol: new_data})
-            _store_cached_data(symbol, combined)
+        if last_date_value is None:
+            print(
+                f" Missing recent data for {symbol}; run build_ohlcv_last2y.py to refresh the master CSV."
+            )
         else:
-            results[symbol] = csv_df
+            print(
+                f" Data for {symbol} is stale (latest {last_date_value}); run build_ohlcv_last2y.py for updates."
+            )
+        results[symbol] = csv_df
 
     return results
 
