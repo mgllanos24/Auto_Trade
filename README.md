@@ -92,7 +92,7 @@ setups:
    by running:
 
    ```bash
-   python update_us_liquid_stocks.py
+   python build_ohlcv_last2y.py
    ```
 
 2. Scan every symbol in that CSV and append qualifying patterns to your
