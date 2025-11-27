@@ -6,6 +6,8 @@ from pathlib import Path
 import types
 from unittest import mock
 
+import pandas as pd
+
 
 def _install_stub_modules() -> None:
     project_root = Path(__file__).resolve().parent.parent
@@ -516,6 +518,54 @@ def test_detect_inverse_head_shoulders_rejects_single_v_bottom():
     pattern = detect_inverse_head_shoulders(df)
 
     assert pattern is None
+
+
+def test_get_yf_data_falls_back_to_master(monkeypatch):
+    master_df = pd.DataFrame(
+        {
+            "open": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "high": [100.5, 101.5, 102.5, 103.5, 104.5],
+            "low": [99.5, 100.5, 101.5, 102.5, 103.5],
+            "close": [100.2, 101.2, 102.2, 103.2, 104.2],
+            "volume": [1_000_000] * 5,
+        },
+        index=pd.to_datetime(
+            [
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-04",
+                "2024-01-05",
+                "2024-01-08",
+            ],
+            utc=True,
+        ),
+    )
+
+    # Pretend yfinance returns a single unusable row so the master CSV is needed.
+    bad_history = pd.DataFrame(
+        {
+            "Open": [105.0],
+            "High": [106.0],
+            "Low": [104.0],
+            "Close": [105.5],
+            "Adj Close": [105.5],
+            "Volume": [500_000],
+        },
+        index=pd.to_datetime(["2024-02-01"], utc=True),
+    )
+
+    monkeypatch.setattr(pattern_scanner, "_load_cached_data", lambda symbol: None)
+    monkeypatch.setattr(pattern_scanner, "_recover_with_fallback", lambda symbol: None)
+    monkeypatch.setattr(pattern_scanner, "_download_with_yf_history", lambda symbol: None)
+    monkeypatch.setattr(pattern_scanner, "_store_cached_data", lambda symbol, df: None)
+    monkeypatch.setattr(pattern_scanner, "_load_symbol_from_master_csv", lambda symbol: master_df)
+    monkeypatch.setattr(pattern_scanner.yf, "download", lambda *a, **k: bad_history)
+
+    result = pattern_scanner.get_yf_data("ORCL")
+
+    assert result is not None
+    assert len(result) == len(master_df)
+    assert (result.index == master_df.index).all()
 
 
 def test_calculate_rr_price_action_uses_recent_swing_high(monkeypatch):
