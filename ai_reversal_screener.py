@@ -156,6 +156,34 @@ def linreg_slope(series: pd.Series, window: int = 5) -> pd.Series:
 # Feature engineering
 # -----------------------------
 
+def _as_series(obj: pd.Series | pd.DataFrame, label: str) -> pd.Series:
+    """Coerce a Series/DataFrame column into a 1D Series.
+
+    yfinance can return MultiIndex columns even for a single symbol (e.g. when
+    downloading multiple tickers in one call and subsetting afterward).  Pandas
+    then returns a small DataFrame when you access ``df["High"]`` instead of a
+    Series, which later breaks scalar column assignments.  To keep feature
+    engineering robust we squeeze any single-column DataFrame down to a Series
+    and raise a clear error if multiple columns remain.
+    """
+
+    if isinstance(obj, pd.DataFrame):
+        if obj.shape[1] == 1:
+            ser = obj.iloc[:, 0]
+            ser.name = label
+            return ser
+        raise ValueError(f"Expected a single column for {label}, got {obj.shape[1]}")
+    obj.name = label
+    return obj
+
+
+def _get_column(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
+    for column in candidates:
+        if column in df.columns:
+            return _as_series(df[column], column)
+    raise KeyError(f"Expected one of {candidates} in DataFrame")
+
+
 def _select_close(df: pd.DataFrame) -> pd.Series:
     """Return the best available close/adjusted-close series.
 
@@ -164,16 +192,16 @@ def _select_close(df: pd.DataFrame) -> pd.Series:
     few common column names before raising a clear error.
     """
 
-    for column in ("Adj Close", "adj_close", "Close", "close"):
-        if column in df.columns:
-            return df[column]
-    raise KeyError("Expected a close price column (Adj Close/Close/close) in DataFrame")
+    return _get_column(df, ["Adj Close", "adj_close", "Close", "close"])
 
 
 def make_features(df: pd.DataFrame, intermarket: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
     c = _select_close(df).copy()
     c.name = "Close"
-    o, h, l, v = df["Open"], df["High"], df["Low"], df["Volume"]
+    o = _get_column(df, ["Open", "open"])
+    h = _get_column(df, ["High", "high"])
+    l = _get_column(df, ["Low", "low"])
+    v = _get_column(df, ["Volume", "volume"])
 
     feats = pd.DataFrame(index=df.index)
 
