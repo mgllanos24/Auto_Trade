@@ -2410,6 +2410,58 @@ def _normalise_watchlist_row(row: list[str], header: Optional[Sequence[str]] = N
     return values
 
 
+def _read_existing_watchlist(path: Path) -> dict[str, list[str]]:
+    """Load existing watchlist entries from ``path``.
+
+    The helper trims legacy columns, ignores empty rows, and skips entries
+    without a symbol so that partially written files do not break the update
+    process.
+    """
+
+    if not path.exists():
+        return {}
+
+    entries: dict[str, list[str]] = {}
+    with path.open("r", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        for row in reader:
+            if not row or len(row) < 2 or all(not cell.strip() for cell in row):
+                continue
+
+            normalised = _normalise_watchlist_row(row, header)
+            symbol = normalised[0]
+            if not symbol:
+                continue
+
+            entries[symbol] = normalised
+
+    return entries
+
+
+def _write_watchlist(path: Path, entries: Sequence[Sequence[Any]]) -> None:
+    """Persist watchlist rows atomically.
+
+    ``entries`` can contain rows of varying length; they are normalised to the
+    current header before writing.  A temporary file is used to avoid corrupting
+    the main watchlist if the process is interrupted mid-write.
+    """
+
+    normalised_rows = [
+        _normalise_watchlist_row(list(row), WATCHLIST_HEADER) for row in entries
+    ]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+
+    with temp_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(WATCHLIST_HEADER)
+        writer.writerows(sorted(normalised_rows, key=lambda row: row[0]))
+
+    temp_path.replace(path)
+
+
 def log_watchlist(
     symbol,
     pattern,
@@ -2452,25 +2504,10 @@ def log_watchlist(
         volume_3mo
     ]
 
-    if path.exists():
-        with open(path, 'r') as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            existing = {}
-            for row in reader:
-                if not row:
-                    continue
-                normalised = _normalise_watchlist_row(row, header)
-                existing[normalised[0]] = normalised
-    else:
-        existing = {}
-
+    existing = _read_existing_watchlist(path)
     existing[symbol] = new_entry
 
-    with open(path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(WATCHLIST_HEADER)
-        writer.writerows(sorted(existing.values(), key=lambda x: x[0]))
+    _write_watchlist(path, existing.values())
 
     if pattern_details is not None:
         try:
