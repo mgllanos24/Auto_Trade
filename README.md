@@ -43,7 +43,11 @@ ALPACA_API_SECRET=your_api_secret
 ```
 
 When the GUI launches it will populate the environment from this file, so you
-do not need to export the variables manually.
+do not need to export the variables manually. Each key–value pair must live on
+its own line (do **not** include literal ``\n`` sequences), and the variable
+names must stay exactly ``ALPACA_API_KEY`` and ``ALPACA_API_SECRET``—passing your
+actual key as the variable name will trigger the ``Missing required environment
+variable`` error from ``live_trading_gui.py``.
 
 ## Getting market data
 
