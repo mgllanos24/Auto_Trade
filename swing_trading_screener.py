@@ -20,6 +20,7 @@ import pandas as pd
 
 __all__ = [
     "SwingCandidate",
+    "SwingEvaluation",
     "SwingScreenerConfig",
     "evaluate_swing_setup",
     "screen_swing_candidates",
@@ -37,6 +38,14 @@ class SwingCandidate:
     atr_pct: float
     rsi: float
     pullback_pct: float
+
+
+@dataclass(frozen=True)
+class SwingEvaluation:
+    """Outcome of a swing evaluation with an optional rejection reason."""
+
+    candidate: Optional[SwingCandidate]
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -111,20 +120,34 @@ def evaluate_swing_setup(
     symbol: str,
     df: pd.DataFrame,
     config: SwingScreenerConfig | None = None,
-) -> Optional[SwingCandidate]:
-    """Return a :class:`SwingCandidate` if the symbol satisfies the filters."""
+    *,
+    return_reason: bool = False,
+) -> SwingEvaluation | Optional[SwingCandidate]:
+    """Return a :class:`SwingCandidate` if the symbol satisfies the filters.
+
+    When ``return_reason`` is ``True`` the function returns a
+    :class:`SwingEvaluation` that includes the first rejection reason
+    encountered. This makes it easier for callers to understand why the
+    scanner produced no candidates without altering the existing "candidate or
+    ``None``" return contract.
+    """
+
+    def reject(message: str) -> Optional[SwingCandidate]:
+        if return_reason:
+            return SwingEvaluation(None, message)  # type: ignore[return-value]
+        return None
 
     if df is None or df.empty or not _validate_ohlcv(df):
-        return None
+        return reject("missing ohlcv columns")
 
     config = config or SwingScreenerConfig()
 
     if len(df) < config.min_candles:
-        return None
+        return reject("not enough candles")
 
     recent = df.tail(config.long_ma + 5).copy()
     if recent[["high", "low", "close", "volume"]].isnull().any().any():
-        return None
+        return reject("recent data contains nulls")
 
     close = float(recent["close"].iloc[-1])
 
@@ -134,38 +157,38 @@ def evaluate_swing_setup(
     short_ma_val = sma_short.iloc[-1]
     long_ma_val = sma_long.iloc[-1]
     if np.isnan(short_ma_val) or np.isnan(long_ma_val):
-        return None
+        return reject("moving averages missing")
 
     if close <= long_ma_val or short_ma_val <= long_ma_val:
-        return None
+        return reject("price or short ma below long ma")
 
     avg_volume = recent["volume"].tail(config.volume_window).mean()
     if float(avg_volume) < config.min_average_volume:
-        return None
+        return reject("average volume below threshold")
 
     atr_series = _atr(recent, config.atr_period)
     atr_val = float(atr_series.iloc[-1]) if not atr_series.empty else np.nan
     if not np.isfinite(atr_val):
-        return None
+        return reject("atr unavailable")
     atr_pct = atr_val / close if close else np.nan
     if not np.isfinite(atr_pct) or atr_pct > config.max_atr_pct:
-        return None
+        return reject("atr percent too high")
 
     rsi_series = _rsi(recent["close"], config.rsi_period)
     rsi_val = float(rsi_series.iloc[-1])
     rsi_low, rsi_high = config.rsi_bounds
     if not (rsi_low <= rsi_val <= rsi_high):
-        return None
+        return reject("rsi outside bounds")
 
     pullback_series = _pullback_pct(recent["close"], config.pullback_window)
     pullback_val = float(pullback_series.iloc[-1]) if not pullback_series.empty else np.nan
     if not np.isfinite(pullback_val) or pullback_val > config.max_pullback_pct:
-        return None
+        return reject("pullback exceeds limit")
 
     trend_strength = (short_ma_val - long_ma_val) / long_ma_val
     momentum_score = (close - short_ma_val) / short_ma_val
 
-    return SwingCandidate(
+    candidate = SwingCandidate(
         symbol=symbol,
         close=close,
         trend_strength=float(trend_strength),
@@ -174,6 +197,11 @@ def evaluate_swing_setup(
         rsi=float(rsi_val),
         pullback_pct=float(pullback_val),
     )
+
+    if return_reason:
+        return SwingEvaluation(candidate, None)  # type: ignore[return-value]
+
+    return candidate
 
 
 def screen_swing_candidates(

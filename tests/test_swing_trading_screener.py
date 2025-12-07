@@ -4,6 +4,7 @@ from typing import Sequence
 
 from swing_trading_screener import (
     SwingCandidate,
+    SwingEvaluation,
     SwingScreenerConfig,
     evaluate_swing_setup,
     screen_swing_candidates,
@@ -76,4 +77,31 @@ def test_screen_swing_candidates_orders_by_trend_and_momentum():
     results = screen_swing_candidates(data, config=config)
     assert [c.symbol for c in results] == ["STRONG", "BASE"]
     assert results[0].trend_strength >= results[1].trend_strength
+
+
+def test_evaluate_swing_setup_exposes_rejection_reason():
+    df = _build_dataframe(np.linspace(10, 20, 10))
+
+    result = evaluate_swing_setup("TOO_SHORT", df, return_reason=True)
+
+    assert isinstance(result, SwingEvaluation)
+    assert result.candidate is None
+    assert result.reason == "not enough candles"
+
+
+def test_evaluate_swing_setup_returns_candidate_with_reason_flag():
+    prices = _trend_with_noise(50.0, 0.08)
+    df = _build_dataframe(prices)
+
+    config = SwingScreenerConfig(
+        min_average_volume=100_000,
+        max_atr_pct=0.05,
+        rsi_bounds=(40.0, 80.0),
+    )
+
+    result = evaluate_swing_setup("TREND", df, config, return_reason=True)
+
+    assert isinstance(result, SwingEvaluation)
+    assert isinstance(result.candidate, SwingCandidate)
+    assert result.reason is None
 
