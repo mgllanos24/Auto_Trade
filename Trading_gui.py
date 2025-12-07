@@ -53,6 +53,7 @@ from pattern_scanner import (
     detect_bullish_rectangle,
     detect_inverse_head_shoulders,
     detect_rounding_bottom,
+    AVAILABLE_PATTERNS,
     load_symbol_from_master_csv,
     load_pattern_dataclass,
     WATCHLIST_PATH,
@@ -2074,10 +2075,11 @@ def delete_selected_order():
 
 scan_status_var = None
 scan_button = None
+scan_pattern_var = None
 is_scanning = False
 
 
-def run_scan():
+def run_scan(selected_pattern: Optional[str] = None):
     global is_scanning
 
     if is_scanning or scan_status_var is None or scan_button is None:
@@ -2089,12 +2091,18 @@ def run_scan():
         return
 
     is_scanning = True
-    scan_status_var.set("Running…")
+    status_label = "Running…"
+    cmd = [sys.executable, str(script_path)]
+    if selected_pattern:
+        cmd.extend(["--pattern", selected_pattern])
+        status_label = f"Running ({selected_pattern})…"
+
+    scan_status_var.set(status_label)
     scan_button.config(state="disabled")
 
     def worker():
         try:
-            subprocess.run([sys.executable, str(script_path)], check=True)
+            subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as exc:
             status = f"Failed (code {exc.returncode})"
         except Exception as exc:  # pragma: no cover - GUI feedback path
@@ -2113,6 +2121,15 @@ def run_scan():
         root.after(0, finalize)
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def run_selected_pattern_scan():
+    pattern = None
+    if scan_pattern_var is not None:
+        selection = scan_pattern_var.get()
+        if selection and selection != "All Patterns":
+            pattern = selection
+    run_scan(pattern)
 
 def _flatten_columns(columns) -> list[str]:
     expected_labels = {"open", "high", "low", "close", "volume"}
@@ -3364,7 +3381,7 @@ def sort_treeview(tree, col, descending=False):
 
 def setup_layout():
     global tree, chart_frame, symbol_var, qty_var, entry_var, sl_var, total_value_var, order_tree
-    global scan_status_var, scan_button
+    global scan_status_var, scan_button, scan_pattern_var
 
     last_edited = {"field": None}
 
@@ -3411,8 +3428,18 @@ def setup_layout():
 
     top = tk.Frame(root); top.pack(fill="x", padx=10, pady=5)
     scan_status_var = tk.StringVar(value="Idle")
+    pattern_options = ["All Patterns", *AVAILABLE_PATTERNS]
+    scan_pattern_var = tk.StringVar(value=pattern_options[0])
+    ttk.Combobox(
+        top,
+        textvariable=scan_pattern_var,
+        values=pattern_options,
+        state="readonly",
+        width=22,
+    ).pack(side="left", padx=5)
     scan_button = tk.Button(top, text="Pattern Scanner", command=run_scan)
     scan_button.pack(side="left")
+    tk.Button(top, text="Scan Selected Pattern", command=run_selected_pattern_scan).pack(side="left", padx=5)
     tk.Label(top, textvariable=scan_status_var).pack(side="left", padx=10)
     tk.Button(top, text="Reload Watchlist", command=refresh_watchlist).pack(side="right", padx=5)
 

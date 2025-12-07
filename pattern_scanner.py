@@ -120,6 +120,21 @@ SWING_CONFIG = SwingScreenerConfig()
 REVERSAL_START_DATE = "2015-01-01"
 REVERSAL_INTERMARKET = ["SPY", "DXY", "^VIX"]
 
+PATTERN_ALIASES = {
+    "cup and handle": "Cup and Handle",
+    "cup & handle": "Cup and Handle",
+    "inverse head and shoulders": "Inverse Head and Shoulders",
+    "ihs": "Inverse Head and Shoulders",
+    "ascending triangle": "Ascending Triangle",
+    "bullish pennant": "Bullish Pennant",
+    "bullish flag": "Bullish Flag",
+    "bullish rectangle": "Bullish Rectangle",
+    "rounding bottom": "Rounding Bottom",
+    "breakaway gap": "Breakaway Gap",
+}
+
+AVAILABLE_PATTERNS = tuple(dict.fromkeys(PATTERN_ALIASES.values()))
+
 
 @dataclass
 class AscendingTrianglePattern:
@@ -1655,46 +1670,62 @@ def _score_breakaway_gap(pattern: BreakawayGapPattern) -> float:
     return _clamp(score, 0.0, 0.9)
 
 
-def _collect_pattern_candidates(df: pd.DataFrame) -> List[PatternCandidate]:
+def _normalize_pattern_name(name: str) -> Optional[str]:
+    normalized = PATTERN_ALIASES.get(name.strip().lower())
+    return normalized
+
+
+def _collect_pattern_candidates(
+    df: pd.DataFrame, allowed_patterns: Optional[Sequence[str]] = None
+) -> List[PatternCandidate]:
+    allowed_set: set[str] = set()
+    for pattern in allowed_patterns or []:
+        resolved = pattern if pattern in AVAILABLE_PATTERNS else _normalize_pattern_name(pattern)
+        if resolved:
+            allowed_set.add(resolved)
+
+    def _should_include(label: str) -> bool:
+        return not allowed_set or label in allowed_set
+
     candidates: List[PatternCandidate] = []
 
     cup_handle_hit = detect_cup_and_handle(df)
-    if cup_handle_hit:
+    if cup_handle_hit and _should_include("Cup and Handle"):
         confidence = _score_cup_handle_hit(cup_handle_hit)
         candidates.append(PatternCandidate("Cup and Handle", confidence, cup_handle_hit))
 
     ihs = detect_inverse_head_shoulders(df)
-    if ihs:
+    if ihs and _should_include("Inverse Head and Shoulders"):
         confidence = _score_inverse_head_shoulders(ihs)
         candidates.append(PatternCandidate("Inverse Head and Shoulders", confidence, ihs))
 
     ascending_triangle = detect_ascending_triangle(df)
-    if ascending_triangle:
+    if ascending_triangle and _should_include("Ascending Triangle"):
         confidence = _score_ascending_triangle(ascending_triangle)
         candidates.append(PatternCandidate("Ascending Triangle", confidence, ascending_triangle))
 
     pennant = detect_bullish_pennant(df)
-    if pennant:
+    if pennant and _should_include("Bullish Pennant"):
         confidence = _score_bullish_pennant(pennant)
         candidates.append(PatternCandidate("Bullish Pennant", confidence, pennant))
 
     flag = detect_bullish_flag(df)
-    if flag:
+    if flag and _should_include("Bullish Flag"):
         confidence = _score_bullish_flag(flag)
         candidates.append(PatternCandidate("Bullish Flag", confidence, flag))
 
     rectangle = detect_bullish_rectangle(df)
-    if rectangle:
+    if rectangle and _should_include("Bullish Rectangle"):
         confidence = _score_bullish_rectangle(rectangle)
         candidates.append(PatternCandidate("Bullish Rectangle", confidence, rectangle))
 
     rounding_bottom = detect_rounding_bottom(df)
-    if rounding_bottom:
+    if rounding_bottom and _should_include("Rounding Bottom"):
         confidence = _score_rounding_bottom(rounding_bottom)
         candidates.append(PatternCandidate("Rounding Bottom", confidence, rounding_bottom))
 
     gap = detect_breakaway_gap(df)
-    if gap:
+    if gap and _should_include("Breakaway Gap"):
         confidence = _score_breakaway_gap(gap)
         candidates.append(PatternCandidate("Breakaway Gap", confidence, gap))
 
@@ -2604,8 +2635,42 @@ def _run_cli():
         action="store_true",
         help="Skip the synthetic ascending triangle demonstration",
     )
+    parser.add_argument(
+        "--pattern",
+        dest="patterns",
+        action="append",
+        help=(
+            "Restrict the scan to a specific pattern. "
+            "Can be provided multiple times. Options: "
+            + ", ".join(AVAILABLE_PATTERNS)
+        ),
+    )
+    parser.add_argument(
+        "--list-patterns",
+        action="store_true",
+        help="Display the supported pattern names and exit",
+    )
 
     args = parser.parse_args()
+
+    if args.list_patterns:
+        print("Available patterns:")
+        for name in AVAILABLE_PATTERNS:
+            print(f" - {name}")
+        return
+
+    allowed_patterns: List[str] = []
+    if args.patterns:
+        for pattern in args.patterns:
+            resolved = _normalize_pattern_name(pattern)
+            if not resolved and pattern in AVAILABLE_PATTERNS:
+                resolved = pattern
+            if not resolved:
+                parser.error(
+                    f"Unknown pattern '{pattern}'. Choose from: "
+                    + ", ".join(AVAILABLE_PATTERNS)
+                )
+            allowed_patterns.append(resolved)
 
     if not args.skip_demo:
         _demo_ascending_triangle_detection()
@@ -2625,9 +2690,9 @@ def _run_cli():
         print(" No symbols to scan. Provide a symbols file or use --from-master.")
         return
 
-    scan_all_symbols(symbols)
+    scan_all_symbols(symbols, allowed_patterns)
 
-def scan_all_symbols(symbols):
+def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
     initialize_watchlist()
     disqualified = []
 
@@ -2635,6 +2700,10 @@ def scan_all_symbols(symbols):
     data_by_symbol = fetch_symbol_data(symbols_to_fetch)
     update_master_csv(data_by_symbol)
     reversal_results = _scan_trend_reversal(symbols_to_fetch)
+
+    if allowed_patterns:
+        allowed_display = ", ".join(dict.fromkeys(allowed_patterns))
+        print(f" Restricting pattern scan to: {allowed_display}")
 
     for symbol in symbols:
         print(f"\n Scanning {symbol}...")
@@ -2680,7 +2749,7 @@ def scan_all_symbols(symbols):
             else:
                 print(" Swing setup did not meet the screener criteria")
 
-            candidates = _collect_pattern_candidates(df)
+            candidates = _collect_pattern_candidates(df, allowed_patterns)
             if not candidates:
                 print(" Skipped: No pattern matched")
                 disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
