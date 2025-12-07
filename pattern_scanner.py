@@ -2548,10 +2548,31 @@ def log_watchlist(
 
 
 def initialize_watchlist():
-    """Create or reset the watchlist file with only the header."""
+    """Create the watchlist file without clobbering existing entries."""
+
     WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(WATCHLIST_PATH, 'w', newline='') as f:
-        writer = csv.writer(f)
+
+    # Avoid wiping user data on every scan: only write a fresh header when the
+    # watchlist is missing or corrupted.  Otherwise leave existing rows intact
+    # so the UI still shows the last successful scan even if the current run
+    # finds no matches.
+    if WATCHLIST_PATH.exists():
+        try:
+            with WATCHLIST_PATH.open("r", newline="") as handle:
+                reader = csv.reader(handle)
+                header = next(reader, None)
+                if header and list(header)[: len(WATCHLIST_HEADER)] == list(
+                    WATCHLIST_HEADER
+                ):
+                    return
+        except OSError:
+            # Fall back to rewriting the file if it cannot be read (e.g.
+            # permissions issues).  We prefer to keep the previous contents but
+            # recovering with a clean header is better than crashing.
+            pass
+
+    with WATCHLIST_PATH.open("w", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(WATCHLIST_HEADER)
 
 

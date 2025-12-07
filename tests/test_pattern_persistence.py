@@ -190,3 +190,26 @@ def test_log_watchlist_skips_corrupt_rows(tmp_path, monkeypatch):
 
     assert rows[0] == pattern_scanner.WATCHLIST_HEADER
     assert [row[0] for row in rows[1:]] == ["CLEAN"]
+
+
+def test_initialize_watchlist_preserves_existing_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_TRADE_DATA_DIR", str(tmp_path))
+
+    pattern_scanner = importlib.import_module("pattern_scanner")
+    pattern_scanner = importlib.reload(pattern_scanner)
+
+    watchlist_path = pattern_scanner.WATCHLIST_PATH
+    watchlist_path.parent.mkdir(parents=True, exist_ok=True)
+    with watchlist_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(pattern_scanner.WATCHLIST_HEADER)
+        writer.writerow(["KEEP", "", "", "", "", "", "", "", ""])
+
+    pattern_scanner.initialize_watchlist()
+
+    with watchlist_path.open("r", newline="") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+
+    assert rows[0] == list(pattern_scanner.WATCHLIST_HEADER)
+    assert any(row and row[0] == "KEEP" for row in rows[1:])
