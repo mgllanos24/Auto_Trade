@@ -2092,7 +2092,7 @@ def run_scan(selected_pattern: Optional[str] = None):
 
     is_scanning = True
     status_label = "Running…"
-    cmd = [sys.executable, str(script_path)]
+    cmd = [sys.executable, str(script_path), "--from-master"]
     if selected_pattern:
         cmd.extend(["--pattern", selected_pattern])
         status_label = f"Running ({selected_pattern})…"
