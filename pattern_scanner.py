@@ -2801,11 +2801,6 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
             indicators = compute_precomputed_indicators(df)
             entry = indicators.entry
 
-            if not is_uptrend(df, indicators):
-                print(" Skipped: Uptrend not confirmed")
-                disqualified.append({'symbol': symbol, 'reason': 'not in uptrend', 'entry': entry, 'rr': None})
-                continue
-
             if not volume_trend_up(df, slope=indicators.volume_slope):
                 print(" Skipped: Volume trend is not increasing")
                 disqualified.append({'symbol': symbol, 'reason': 'volume not picking up', 'entry': entry, 'rr': None})
