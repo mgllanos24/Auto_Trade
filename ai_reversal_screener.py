@@ -359,8 +359,31 @@ def screen_symbols(symbols: List[str], start: str, end: Optional[str], inter_sym
             labels = make_labels(_select_close(df).rename("Close"))
             aligned = feats.join(labels.rename("y"))
 
-            if aligned["y"].dropna().empty:
-                print(f"[WARN] {sym}: label series empty – skipping")
+            non_null_labels = int(aligned["y"].notna().sum())
+            if non_null_labels == 0:
+                label_series = aligned["y"]
+                label_index = label_series.index
+                label_index_start = label_index.min() if len(label_index) else None
+                label_index_end = label_index.max() if len(label_index) else None
+                if len(label_index):
+                    label_start_str = label_index_start.strftime("%Y-%m-%d")
+                    label_end_str = label_index_end.strftime("%Y-%m-%d")
+                else:
+                    label_start_str = "n/a"
+                    label_end_str = "n/a"
+                print(
+                    "[WARN] {sym}: label series empty – skipping "
+                    "(rows={rows}, feats_rows={feats_rows}, labels_total={labels_total}, "
+                    "labels_non_null={labels_non_null}, date_range={date_start}..{date_end})".format(
+                        sym=sym,
+                        rows=len(df),
+                        feats_rows=len(feats),
+                        labels_total=len(labels),
+                        labels_non_null=non_null_labels,
+                        date_start=label_start_str,
+                        date_end=label_end_str,
+                    )
+                )
                 continue
 
             res = walk_forward_fit_predict(aligned.drop(columns=["y"]), aligned["y"], min_train=400)
