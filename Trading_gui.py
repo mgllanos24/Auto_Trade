@@ -3437,9 +3437,8 @@ def setup_layout():
         state="readonly",
         width=22,
     ).pack(side="left", padx=5)
-    scan_button = tk.Button(top, text="Pattern Scanner", command=run_scan)
-    scan_button.pack(side="left")
-    tk.Button(top, text="Scan Selected Pattern", command=run_selected_pattern_scan).pack(side="left", padx=5)
+    scan_button = tk.Button(top, text="Scan Selected Pattern", command=run_selected_pattern_scan)
+    scan_button.pack(side="left", padx=5)
     tk.Label(top, textvariable=scan_status_var).pack(side="left", padx=10)
     tk.Button(top, text="Reload Watchlist", command=refresh_watchlist).pack(side="right", padx=5)
 
