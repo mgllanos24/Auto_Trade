@@ -67,6 +67,13 @@ PATTERN_DETAILS_DIR = DATA_DIR / "pattern_details"
 
 MASTER_CSV_PATH = _resolve_master_csv_path(DATA_DIR)
 
+AUTO_REFRESH_MASTER_CSV = os.environ.get("AUTO_TRADE_AUTO_REFRESH_MASTER_CSV", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
+
 try:
     MASTER_CSV_LOOKBACK_DAYS = int(
         os.environ.get("AUTO_TRADE_MASTER_LOOKBACK_DAYS", "0")
@@ -1264,6 +1271,59 @@ def _load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
     return cleaned
 
 
+def _clear_master_csv_cache() -> None:
+    global _MASTER_CSV_CACHE, _MASTER_CSV_FAILED, _MASTER_CSV_MTIME
+    _MASTER_CSV_CACHE = None
+    _MASTER_CSV_FAILED = False
+    _MASTER_CSV_MTIME = None
+
+
+def _load_symbol_data_from_master(
+    symbols: Sequence[str],
+) -> tuple[Dict[str, pd.DataFrame], Dict[str, Optional[date]]]:
+    results: Dict[str, pd.DataFrame] = {}
+    last_dates: Dict[str, Optional[date]] = {}
+
+    for symbol in symbols:
+        csv_df = _load_symbol_from_master_csv(symbol)
+        if csv_df is None or csv_df.empty:
+            results[symbol] = pd.DataFrame()
+            last_dates[symbol] = None
+            continue
+
+        last_date = None
+        try:
+            last_date = csv_df.index.max()
+        except Exception:
+            pass
+
+        if last_date is not None and getattr(last_date, "date", None):
+            last_dates[symbol] = last_date.date()
+        else:
+            last_dates[symbol] = None
+
+        results[symbol] = csv_df
+
+    return results, last_dates
+
+
+def _refresh_master_csv() -> bool:
+    if not AUTO_REFRESH_MASTER_CSV:
+        return False
+
+    print(" Master CSV appears stale; attempting refresh via build_ohlcv_last2y.py.")
+    from build_ohlcv_last2y import main as build_master_csv
+
+    try:
+        build_master_csv()
+    except Exception as exc:
+        print(f" Failed to refresh master CSV: {exc}")
+        return False
+
+    _clear_master_csv_cache()
+    return True
+
+
 def load_symbol_from_master_csv(symbol: str) -> Optional[pd.DataFrame]:
     """Public wrapper used by external consumers such as the GUI."""
 
@@ -1461,27 +1521,7 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
         return results
 
     latest_expected = _latest_trading_day()
-    last_dates: Dict[str, Optional[date]] = {}
-
-    for symbol in symbols:
-        csv_df = _load_symbol_from_master_csv(symbol)
-        if csv_df is None or csv_df.empty:
-            results[symbol] = pd.DataFrame()
-            last_dates[symbol] = None
-            continue
-
-        last_date = None
-        try:
-            last_date = csv_df.index.max()
-        except Exception:
-            pass
-
-        if last_date is not None and getattr(last_date, "date", None):
-            last_dates[symbol] = last_date.date()
-        else:
-            last_dates[symbol] = None
-
-        results[symbol] = csv_df
+    results, last_dates = _load_symbol_data_from_master(symbols)
 
     latest_available = max((d for d in last_dates.values() if d is not None), default=None)
     if latest_available is not None and latest_expected > latest_available:
@@ -1492,6 +1532,25 @@ def fetch_symbol_data(symbols: Sequence[str], max_workers: int = 8) -> Dict[str,
                 "assuming that was the most recent trading day."
             )
             latest_expected = latest_available
+
+    stale_symbols = [
+        symbol
+        for symbol, last_date_value in last_dates.items()
+        if last_date_value is None or last_date_value < latest_expected
+    ]
+
+    if stale_symbols and _refresh_master_csv():
+        latest_expected = _latest_trading_day()
+        results, last_dates = _load_symbol_data_from_master(symbols)
+        latest_available = max((d for d in last_dates.values() if d is not None), default=None)
+        if latest_available is not None and latest_expected > latest_available:
+            confirmations = sum(1 for d in last_dates.values() if d == latest_available)
+            if confirmations >= 3 and (latest_expected - latest_available).days <= 3:
+                print(
+                    f" Detected {confirmations} symbols capped at {latest_available}; "
+                    "assuming that was the most recent trading day."
+                )
+                latest_expected = latest_available
 
     for symbol, last_date_value in last_dates.items():
         csv_df = results[symbol]
