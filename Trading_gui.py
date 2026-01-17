@@ -1888,6 +1888,12 @@ def fetch_institution_snapshot(
     return inst_summary, None
 
 
+def _all_true_array(value: Any) -> bool:
+    if isinstance(value, np.ndarray):
+        return value.size > 0 and np.all(value)
+    return bool(value)
+
+
 def _detect_with_trimming(
     detector: Callable[..., Any],
     df: pd.DataFrame,
@@ -1904,7 +1910,7 @@ def _detect_with_trimming(
             break
         trimmed = df.iloc[:-trim]
         result = detector(trimmed, **kwargs)
-        if result:
+        if _all_true_array(result):
             return result
 
     return None
@@ -1926,7 +1932,7 @@ def _scan_with_trimming(
             break
         trimmed = df.iloc[:-trim]
         results = scanner(trimmed, **kwargs)
-        if results:
+        if _all_true_array(results):
             return results
 
     return []
