@@ -2806,11 +2806,6 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
                 disqualified.append({'symbol': symbol, 'reason': 'volume not picking up', 'entry': entry, 'rr': None})
                 continue
 
-            if not is_near_breakout(df, recent_high=indicators.recent_high_20, last_close=entry):
-                print(" Skipped: Not near breakout")
-                disqualified.append({'symbol': symbol, 'reason': 'not near breakout', 'entry': entry, 'rr': None})
-                continue
-
             swing_candidate = evaluate_swing_setup(symbol, df, SWING_CONFIG)
             if isinstance(swing_candidate, SwingCandidate):
                 print(
