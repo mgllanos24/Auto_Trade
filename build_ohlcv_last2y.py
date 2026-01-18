@@ -392,8 +392,14 @@ def _determine_date_range(existing: Optional[pd.DataFrame]):
         last_date = existing["date"].max()
         if pd.isna(last_date):
             raise ValueError("Existing data contains invalid dates.")
+        if last_date > end_dt:
+            print(
+                "Warning: existing CSV contains future dates; clamping refresh window to today."
+            )
+            last_date = end_dt
         start_dt = max(last_date + timedelta(days=1), earliest_allowed)
 
+    start_dt = min(start_dt, end_dt)
     return start_dt, end_dt, earliest_allowed
 
 
@@ -436,7 +442,9 @@ def main():
         raise ValueError("No data available after combining existing and new downloads.")
 
     combined = combined.drop_duplicates(subset=["date", "ticker"]).sort_values(["ticker", "date"])
-    combined = combined[combined["date"] >= earliest_allowed]
+    combined = combined[
+        (combined["date"] >= earliest_allowed) & (combined["date"] <= end_dt)
+    ]
 
     filtered = _filter_liquid(combined)
     filtered.to_csv(out_path, index=False)
