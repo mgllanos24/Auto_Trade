@@ -23,7 +23,6 @@ from swing_trading_screener import (
     SwingScreenerConfig,
     evaluate_swing_setup,
 )
-from ai_reversal_screener import screen_symbols as run_reversal_screen
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -123,9 +122,6 @@ WATCHLIST_HEADER = [
 ]
 
 SWING_CONFIG = SwingScreenerConfig()
-
-REVERSAL_START_DATE = "2015-01-01"
-REVERSAL_INTERMARKET = ["SPY", "DXY", "^VIX"]
 
 PATTERN_ALIASES = {
     "cup and handle": "Cup and Handle",
@@ -2635,39 +2631,6 @@ def initialize_watchlist():
         writer.writerow(WATCHLIST_HEADER)
 
 
-def _scan_trend_reversal(symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:
-    """Run the short-term trend reversal screener for ``symbols``.
-
-    The screener reuses the standalone ``ai_reversal_screener`` logic so that
-    we evaluate the exact same universe of tickers that the pattern scanner is
-    analysing.  Results are returned as a mapping keyed by the upper-case
-    symbol for easy lookups during the main scan loop.
-    """
-
-    unique_symbols = sorted({sym.upper() for sym in symbols})
-    if not unique_symbols:
-        return {}
-
-    try:
-        reversal_table = run_reversal_screen(
-            unique_symbols,
-            REVERSAL_START_DATE,
-            None,
-            REVERSAL_INTERMARKET,
-            None,
-        )
-    except Exception as exc:  # pragma: no cover - defensive and network errors
-        print(f" Trend-reversal scan failed: {exc}")
-        return {}
-
-    summary: Dict[str, Dict[str, Any]] = {}
-    for _, row in reversal_table.iterrows():
-        symbol = str(row.get("symbol", "")).upper()
-        if not symbol:
-            continue
-        summary[symbol] = row.to_dict()
-    return summary
-
 
 def _demo_ascending_triangle_detection():
     """Demonstrate ascending triangle detection on synthetic data."""
@@ -2779,7 +2742,6 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
     symbols_to_fetch = [s for s in symbols if s.upper() not in EXCLUDED_ETFS]
     data_by_symbol = fetch_symbol_data(symbols_to_fetch)
     update_master_csv(data_by_symbol)
-    reversal_results = _scan_trend_reversal(symbols_to_fetch)
 
     if allowed_patterns:
         allowed_display = ", ".join(dict.fromkeys(allowed_patterns))
@@ -2862,41 +2824,6 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
                 f"Entry: {entry:.2f}, RR: {rr_levels.rr_ratio}, "
                 f"Stop: {rr_levels.stop:.2f}, Target: {rr_levels.target:.2f}"
             )
-
-            reversal_data = reversal_results.get(symbol.upper())
-            if reversal_data:
-                prob = reversal_data.get("prob_reversal_1_3d")
-                auc = reversal_data.get("auc")
-                precision = reversal_data.get("precision_top20")
-
-                try:
-                    prob_value = float(prob)
-                    prob_display = "N/A" if np.isnan(prob_value) else f"{prob_value:.2%}"
-                except (TypeError, ValueError):
-                    prob_display = "N/A"
-
-                try:
-                    auc_value = float(auc)
-                    if np.isnan(auc_value):
-                        auc_value = None
-                except (TypeError, ValueError):
-                    auc_value = None
-
-                try:
-                    precision_value = float(precision)
-                    if np.isnan(precision_value):
-                        precision_value = None
-                except (TypeError, ValueError):
-                    precision_value = None
-
-                message_parts = [f" Trend-reversal scan → P(reversal 1-3d): {prob_display}"]
-                if auc_value is not None:
-                    message_parts.append(f"AUC: {auc_value:.3f}")
-                if precision_value is not None:
-                    message_parts.append(f"Precision@20%: {precision_value:.3f}")
-                print(", ".join(message_parts))
-            else:
-                print(" Trend-reversal scan → No data (insufficient history or download failure)")
 
         except Exception as e:
             print(f" Error scanning {symbol}: {e}")
