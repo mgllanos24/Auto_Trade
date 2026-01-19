@@ -1921,11 +1921,21 @@ def _has_meaningful_bounce(low: float, high: float, min_bounce: float = 0.01) ->
     return (high - low) / low >= min_bounce
 
 
+def _coerce_scalar(value: Any) -> float:
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return 0.0
+        return float(value.ravel()[-1])
+    return float(value)
+
+
 def _neckline_is_consistent(left: float, right: float, tolerance: float = 0.05) -> bool:
-    level = (left + right) / 2 if (left or right) else 0.0
+    left_val = _coerce_scalar(left)
+    right_val = _coerce_scalar(right)
+    level = (left_val + right_val) / 2
     if level == 0:
         return False
-    return abs(left - right) / level <= tolerance
+    return abs(left_val - right_val) / level <= tolerance
 
 
 def _fallback_troughs(lows: Sequence[float], distance: int = 3) -> List[int]:
@@ -2417,9 +2427,11 @@ def is_near_breakout(
         recent_high = df['high'].rolling(20).max().iloc[-2]
     if last_close is None:
         last_close = df['close'].iloc[-1]
-    if not recent_high:
+    recent_high_value = _coerce_scalar(recent_high)
+    last_close_value = _coerce_scalar(last_close)
+    if recent_high_value == 0:
         return False
-    return abs(last_close - recent_high) / recent_high <= tolerance
+    return abs(last_close_value - recent_high_value) / recent_high_value <= tolerance
 
 def calculate_rr_price_action(df, entry_price) -> Optional[RiskRewardLevels]:
     from scipy.signal import argrelextrema
