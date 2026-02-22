@@ -763,3 +763,42 @@ def test_update_master_csv_appends_and_deduplicates(tmp_path):
         pattern_scanner.MASTER_CSV_PATH = original_path
         pattern_scanner._MASTER_CSV_CACHE = original_cache
         pattern_scanner._MASTER_CSV_FAILED = original_failed
+
+
+def test_scan_all_symbols_evaluates_patterns_before_volume_gate(monkeypatch):
+    import pandas as pd
+
+    symbol = "MRK"
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 101.0],
+            "high": [101.0, 102.0],
+            "low": [99.0, 100.0],
+            "close": [100.5, 101.5],
+            "volume": [1_000_000, 1_100_000],
+        }
+    )
+
+    monkeypatch.setattr(pattern_scanner, "initialize_watchlist", lambda: None)
+    monkeypatch.setattr(pattern_scanner, "fetch_symbol_data", lambda symbols: {symbol: frame})
+    monkeypatch.setattr(pattern_scanner, "update_master_csv", lambda _data: None)
+    monkeypatch.setattr(
+        pattern_scanner,
+        "compute_precomputed_indicators",
+        lambda _df: pattern_scanner.PrecomputedIndicators(101.5, None, None, None, -1.0, None),
+    )
+    monkeypatch.setattr(pattern_scanner, "volume_trend_up", lambda _df, window=60, slope=None: False)
+    monkeypatch.setattr(pattern_scanner, "evaluate_swing_setup", lambda *_args, **_kwargs: None)
+
+    collect_mock = mock.Mock(
+        return_value=[pattern_scanner.PatternCandidate("Cup and Handle", 0.9, None)]
+    )
+    monkeypatch.setattr(pattern_scanner, "_collect_pattern_candidates", collect_mock)
+
+    log_mock = mock.Mock()
+    monkeypatch.setattr(pattern_scanner, "log_watchlist", log_mock)
+
+    pattern_scanner.scan_all_symbols([symbol])
+
+    collect_mock.assert_called_once()
+    log_mock.assert_not_called()
