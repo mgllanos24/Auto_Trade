@@ -134,6 +134,9 @@ PATTERN_ALIASES = {
     "bullish rectangle": "Bullish Rectangle",
     "rounding bottom": "Rounding Bottom",
     "breakaway gap": "Breakaway Gap",
+    "support and resistance": "Support and Resistance",
+    "support & resistance": "Support and Resistance",
+    "support resistance": "Support and Resistance",
 }
 
 AVAILABLE_PATTERNS = tuple(dict.fromkeys(PATTERN_ALIASES.values()))
@@ -210,6 +213,16 @@ class BreakawayGapPattern:
     prev_close: float
     curr_open: float
     curr_close: float
+
+
+@dataclass
+class SupportResistancePattern:
+    support: float
+    resistance: float
+    support_touch_count: int
+    resistance_touch_count: int
+    support_heavy_volume_ratio: float
+    resistance_heavy_volume_ratio: float
 
 
 @dataclass
@@ -1725,6 +1738,15 @@ def _score_breakaway_gap(pattern: BreakawayGapPattern) -> float:
     return _clamp(score, 0.0, 0.9)
 
 
+def _score_support_resistance(pattern: SupportResistancePattern) -> float:
+    score = 0.55
+    score += _clamp(pattern.support_touch_count * 0.03, 0.0, 0.15)
+    score += _clamp(pattern.resistance_touch_count * 0.03, 0.0, 0.15)
+    score += _clamp((pattern.support_heavy_volume_ratio - 1.0) * 0.2, 0.0, 0.08)
+    score += _clamp((pattern.resistance_heavy_volume_ratio - 1.0) * 0.2, 0.0, 0.08)
+    return _clamp(score, 0.0, 0.92)
+
+
 def _normalize_pattern_name(name: str) -> Optional[str]:
     normalized = PATTERN_ALIASES.get(name.strip().lower())
     return normalized
@@ -1783,6 +1805,11 @@ def _collect_pattern_candidates(
     if gap and _should_include("Breakaway Gap"):
         confidence = _score_breakaway_gap(gap)
         candidates.append(PatternCandidate("Breakaway Gap", confidence, gap))
+
+    support_resistance = detect_support_resistance_volume(df)
+    if support_resistance and _should_include("Support and Resistance"):
+        confidence = _score_support_resistance(support_resistance)
+        candidates.append(PatternCandidate("Support and Resistance", confidence, support_resistance))
 
     candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
     return candidates
@@ -1849,6 +1876,14 @@ def _print_pattern_details(candidate: PatternCandidate) -> None:
             f"Prev Close: {details.prev_close:.2f}, "
             f"Open: {details.curr_open:.2f}, Close: {details.curr_close:.2f}, "
             f"Gap: {gap_pct * 100:.1f}%, Body: {body_pct * 100:.1f}%"
+        )
+    elif isinstance(details, SupportResistancePattern):
+        print(
+            "  Support/Resistance details → "
+            f"Support: {details.support:.2f} ({details.support_touch_count} touches), "
+            f"Resistance: {details.resistance:.2f} ({details.resistance_touch_count} touches), "
+            f"Volume ratios S/R: {details.support_heavy_volume_ratio:.2f}x/"
+            f"{details.resistance_heavy_volume_ratio:.2f}x"
         )
 
 
@@ -2404,6 +2439,69 @@ def detect_breakaway_gap(
         )
 
     return None
+
+
+
+def detect_support_resistance_volume(
+    df,
+    window: int = 120,
+    level_tolerance: float = 0.02,
+    min_touches: int = 3,
+    heavy_volume_multiplier: float = 1.3,
+) -> Optional[SupportResistancePattern]:
+    required = ["high", "low", "close", "volume"]
+    if len(df) < max(window, 20) or any(col not in df.columns for col in required):
+        return None
+
+    segment = df.tail(window).copy()
+    segment = segment.dropna(subset=required)
+    if len(segment) < 20:
+        return None
+
+    zone_size = min(len(segment), max(min_touches * 3, 12))
+    low_zone = segment.nsmallest(zone_size, "low")
+    high_zone = segment.nlargest(zone_size, "high")
+
+    support = float((low_zone["low"] * low_zone["volume"]).sum() / max(low_zone["volume"].sum(), 1e-6))
+    resistance = float((high_zone["high"] * high_zone["volume"]).sum() / max(high_zone["volume"].sum(), 1e-6))
+    if support <= 0 or resistance <= 0 or resistance <= support:
+        return None
+
+    support_band = max(support * level_tolerance, 1e-6)
+    resistance_band = max(resistance * level_tolerance, 1e-6)
+
+    support_touches = (segment["low"] <= support + support_band) & (segment["low"] >= support - support_band)
+    resistance_touches = (segment["high"] >= resistance - resistance_band) & (segment["high"] <= resistance + resistance_band)
+
+    support_touch_count = int(support_touches.sum())
+    resistance_touch_count = int(resistance_touches.sum())
+    if support_touch_count < min_touches or resistance_touch_count < min_touches:
+        return None
+
+    avg_volume = float(segment["volume"].mean())
+    if not np.isfinite(avg_volume) or avg_volume <= 0:
+        return None
+
+    support_touch_volume = float(segment.loc[support_touches, "volume"].mean()) if support_touch_count else 0.0
+    resistance_touch_volume = float(segment.loc[resistance_touches, "volume"].mean()) if resistance_touch_count else 0.0
+
+    support_heavy_volume_ratio = support_touch_volume / avg_volume
+    resistance_heavy_volume_ratio = resistance_touch_volume / avg_volume
+
+    if (
+        support_heavy_volume_ratio < heavy_volume_multiplier
+        and resistance_heavy_volume_ratio < heavy_volume_multiplier
+    ):
+        return None
+
+    return SupportResistancePattern(
+        support=support,
+        resistance=resistance,
+        support_touch_count=support_touch_count,
+        resistance_touch_count=resistance_touch_count,
+        support_heavy_volume_ratio=float(support_heavy_volume_ratio),
+        resistance_heavy_volume_ratio=float(resistance_heavy_volume_ratio),
+    )
 
 
 def volume_trend_up(df, window=60, slope: Optional[float] = None):
