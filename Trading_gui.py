@@ -2701,8 +2701,19 @@ def show_candlestick():
     canvas_container = tk.Frame(chart_frame)
     canvas_container.pack(side="left", fill="both", expand=True)
 
-    price_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    plot_df = df[price_columns].dropna().copy()
+    required_price_fields = ("open", "high", "low", "close", "volume")
+    column_lookup = {str(column).strip().lower(): column for column in df.columns}
+    missing_fields = [field for field in required_price_fields if field not in column_lookup]
+    if missing_fields:
+        messagebox.showinfo(
+            "Chart",
+            f"{sym} is missing OHLCV columns required for charting: {', '.join(missing_fields)}.",
+        )
+        return
+
+    selected_columns = [column_lookup[field] for field in required_price_fields]
+    plot_df = df.loc[:, selected_columns].dropna().copy()
+    plot_df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     if plot_df.empty:
         messagebox.showinfo("Chart", f"No complete OHLC data available for {sym}.")
         return
