@@ -2775,6 +2775,12 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
             indicators = compute_precomputed_indicators(df)
             entry = indicators.entry
 
+            candidates = _collect_pattern_candidates(df, allowed_patterns)
+            if not candidates:
+                print(" Skipped: No pattern matched")
+                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
+                continue
+
             if not volume_trend_up(df, slope=indicators.volume_slope):
                 print(" Skipped: Volume trend is not increasing")
                 disqualified.append({'symbol': symbol, 'reason': 'volume not picking up', 'entry': entry, 'rr': None})
@@ -2792,12 +2798,6 @@ def scan_all_symbols(symbols, allowed_patterns: Optional[Sequence[str]] = None):
                 )
             else:
                 print(" Swing setup did not meet the screener criteria")
-
-            candidates = _collect_pattern_candidates(df, allowed_patterns)
-            if not candidates:
-                print(" Skipped: No pattern matched")
-                disqualified.append({'symbol': symbol, 'reason': 'no pattern matched', 'entry': entry, 'rr': None})
-                continue
 
             best_candidate = candidates[0]
             pattern = best_candidate.name
